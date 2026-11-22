@@ -1,0 +1,138 @@
+---
+export const prerender = false;
+
+import BaseLayout from '@/layouts/BaseLayout.astro';
+import EditorialHeader from '@/components/EditorialHeader.astro';
+import IdentityBoundaryPreview from '@/components/IdentityBoundaryPreview';
+import { getPublicRuntimeSummary } from '@/config/server';
+import { CORE_EDITORIAL_PRINCIPLES } from '@/domain/logic/identity-rules';
+
+const runtimeSummary = getPublicRuntimeSummary();
+---
+
+<BaseLayout>
+  <EditorialHeader />
+
+  <main class="mx-auto max-w-6xl px-6 py-16 sm:px-10 sm:py-24">
+    <section class="border-b border-neutral-200 pb-16 sm:pb-24">
+      <p class="text-xs uppercase tracking-widest text-neutral-500">
+        Fondasi Arsitektur UNSAID
+      </p>
+
+      <h1 class="mt-6 max-w-3xl font-serif text-4xl font-medium tracking-tight text-neutral-950 sm:text-6xl sm:leading-[1.08]">
+        Speak freely. Remain unknown.
+      </h1>
+
+      <p class="mt-6 max-w-2xl text-base leading-relaxed text-neutral-600 sm:text-lg">
+        UNSAID adalah platform publikasi digital berbasis privasi untuk menyampaikan puisi,
+        opini, kritik konstruktif, dan pemikiran independen secara bebas tanpa membuka
+        identitas asli penulis.
+      </p>
+
+      <div class="mt-10 flex flex-wrap items-center gap-x-3 gap-y-1.5 text-xs text-neutral-500">
+        <span class="whitespace-nowrap">Bahasa Utama: Indonesia</span>
+        <span aria-hidden="true">·</span>
+        <span class="whitespace-nowrap">Mode Bawaan: Anonim</span>
+        <span aria-hidden="true">·</span>
+        <span class="whitespace-nowrap">Rendering: Astro SSR</span>
+      </div>
+    </section>
+
+    <section id="prinsip" class="border-b border-neutral-200 py-16 sm:py-20">
+      <div class="mb-12 flex flex-col gap-2">
+        <p class="text-xs uppercase tracking-widest text-neutral-500">
+          Prinsip Produk yang Disetujui
+        </p>
+        <h2 class="font-serif text-2xl font-medium text-neutral-950 sm:text-3xl">
+          Kebebasan berekspresi dengan isolasi identitas sejak awal.
+        </h2>
+      </div>
+
+      <div class="grid gap-10 md:grid-cols-3 md:gap-12">
+        {
+          CORE_EDITORIAL_PRINCIPLES.map((pillar) => (
+            <article class="border-t border-neutral-200 pt-6">
+              <p class="font-mono text-xs tabular-nums text-neutral-400">
+                {pillar.index}
+              </p>
+              <h3 class="mt-3 font-serif text-xl font-medium text-neutral-950">
+                {pillar.title}
+              </h3>
+              <p class="mt-3 text-sm leading-relaxed text-neutral-600">
+                {pillar.description}
+              </p>
+            </article>
+          ))
+        }
+      </div>
+    </section>
+
+    <section id="batas-identitas" class="border-b border-neutral-200 py-16 sm:py-20">
+      <div class="mb-10 max-w-2xl space-y-3">
+        <p class="text-xs uppercase tracking-widest text-neutral-500">
+          Pemisahan Persona &amp; Akun
+        </p>
+        <h2 class="font-serif text-2xl font-medium text-neutral-950 sm:text-3xl">
+          Anonim sebagai standar, alias sebagai pilihan sadar.
+        </h2>
+        <p class="text-sm leading-relaxed text-neutral-600">
+          Komponen interaktif berikut mendemonstrasikan aturan domain UNSAID yang berjalan di
+          atas integrasi Astro SSR dan React.
+        </p>
+      </div>
+
+      <IdentityBoundaryPreview client:load />
+    </section>
+
+    <section id="arsitektur" class="py-16 sm:py-20">
+      <div class="mb-10 max-w-2xl space-y-3">
+        <p class="text-xs uppercase tracking-widest text-neutral-500">
+          Batas Konfigurasi Server-Side
+        </p>
+        <h2 class="font-serif text-2xl font-medium text-neutral-950 sm:text-3xl">
+          Kesiapan Fondasi Teknis
+        </h2>
+        <p class="text-sm leading-relaxed text-neutral-600">
+          Seluruh rahasia server dan kunci layanan dipisahkan dari kode browser dan divalidasi
+          melalui skema Zod di sisi server.
+        </p>
+      </div>
+
+      <dl class="divide-y divide-neutral-200 border-y border-neutral-200 text-sm">
+        <div class="grid gap-2 py-4 sm:grid-cols-3 sm:gap-6">
+          <dt class="font-medium text-neutral-950">Mode Eksekusi</dt>
+          <dd class="text-neutral-600 sm:col-span-2">
+            Astro SSR (Node Standalone Adapter) — lingkungan {runtimeSummary.environment}
+          </dd>
+        </div>
+        <div class="grid gap-2 py-4 sm:grid-cols-3 sm:gap-6">
+          <dt class="font-medium text-neutral-950">Konfigurasi Publik Supabase</dt>
+          <dd class="text-neutral-600 sm:col-span-2">
+            {
+              runtimeSummary.supabasePublicConfigured
+                ? 'Terkonfigurasi (URL & Anon Key publik tersedia)'
+                : 'Belum dikonfigurasi (menunggu kredensial proyek Supabase)'
+            }
+          </dd>
+        </div>
+        <div class="grid gap-2 py-4 sm:grid-cols-3 sm:gap-6">
+          <dt class="font-medium text-neutral-950">Isolasi Kunci Privat Server</dt>
+          <dd class="text-neutral-600 sm:col-span-2">
+            {
+              runtimeSummary.supabaseAdminConfigured
+                ? 'Terkonfigurasi ketat di sisi server saja'
+                : 'Placeholder server-side aktif; kunci layanan tidak terekspos ke browser'
+            }
+          </dd>
+        </div>
+      </dl>
+    </section>
+  </main>
+
+  <footer class="border-t border-neutral-200 bg-white">
+    <div class="mx-auto flex max-w-6xl flex-col gap-3 px-6 py-8 text-xs text-neutral-500 sm:flex-row sm:items-center sm:justify-between sm:px-10">
+      <p class="font-serif text-sm text-neutral-950">UNSAID</p>
+      <p>Speak freely. Remain unknown. · Fondasi Teknis Astro SSR</p>
+    </div>
+  </footer>
+</BaseLayout>
