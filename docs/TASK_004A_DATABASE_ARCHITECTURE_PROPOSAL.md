@@ -1,6 +1,6 @@
-# TASK 004A — UNSAID Supabase PostgreSQL Database Architecture Proposal (Final Audit Revision)
+# TASK 004A — UNSAID Supabase PostgreSQL Database Architecture Proposal (Founder Decisions Incorporated)
 
-**Status Dokumen:** Revisi Pasca-Audit Teknis Final ChatGPT (Design Only — Menunggu Review Akhir & Persetujuan Eksplisit Founder)  
+**Status Dokumen:** TASK 004A — Founder Decisions Incorporated, Pending Final Project Manager Review (Design Only)  
 **Peran:** Senior Database Architect — UNSAID  
 **Tanggal Revisi:** 2026-11-22  
 **Target Branch:** `ai-studio-dev`  
@@ -14,8 +14,9 @@ Seluruh dokumen ini memisahkan secara tegas kategori setiap desain dan keputusan
 
 - **`[APPROVED BY FOUNDER]`** — Keputusan produk, privasi, dan tata kelola final yang telah disetujui Founder dan bersifat mengikat.
 - **`[TECHNICAL RECOMMENDATION]`** — Rekomendasi arsitektur database, keamanan PostgreSQL/PostgREST, kriptografi, dan pemulihan sistem dari tim arsitektur.
+- **`[TECHNICAL POLICY PENDING]`** — Parameter kebijakan teknis operasional (mis. *rate limit* anti-penyalahgunaan harian) yang belum ditetapkan angkanya dan wajib difinalisasi sebelum implementasi produksi.
 - **`[REQUIRES LEGAL REVIEW]`** — Parameter hukum/retensi/preservasi yang wajib ditinjau konsultan hukum (UU PDP, UU ITE, KUHAP) sebelum diberlakukan di produksi.
-- **`[REQUIRES FOUNDER APPROVAL]`** — Keputusan operasional atau kebijakan produk tersisa yang belum final dan masih membutuhkan persetujuan Founder sebelum TASK 004B dimulai.
+- **`[REQUIRES FOUNDER APPROVAL]`** — Keputusan operasional atau kebijakan produk tersisa yang masih membutuhkan persetujuan Founder sebelum TASK 004B dimulai (saat ini **nihil** dari daftar 4 pertanyaan sebelumnya setelah seluruhnya diputuskan Founder).
 
 ---
 
@@ -66,12 +67,13 @@ Arsitektur UNSAID menerapkan **Zero-Personal-Data Public Schema**, **Strict Post
      - Terisolasi penuh dari pengguna biasa, `moderator`, dan `operational_admin`.
      - Menyimpan `legal_preservation_holds`, `legal_preservation_snapshots` (menggunakan **enkripsi AEAD/Envelope Encryption di lapisan aplikasi**, bukan `JSONB` plaintext), dan `legal_access_logs`.
 2. **Keuntungan Struktural Pemindahan `post_drafts`, `bookmarks`, `post_reactions` ke `private`:**
-   - Tabel pribadi tidak pernah muncul di skema OpenAPI/PostgREST publik. Pengguna terautentikasi **tidak** dapat melakukan query REST bebas ke `/rest/v1/post_drafts`, `/rest/v1/bookmarks`, atau `/rest/v1/post_reactions`; seluruh akses baca/tulis pribadi berjalan hanya melalui fungsi RPC tervalidasi yang mengunci identitas ke `auth.uid()` dan memeriksa `account_status = 'active'`.
-3. **Anti-Korelasi Anonim, Multi-Alias, dan Waktu (`[APPROVED BY FOUNDER]`):**
+   - Tabel pribadi tidak pernah muncul di skema OpenAPI/PostgREST publik. Pengguna terautentikasi **tidak** dapat melakukan query REST bebas ke `/rest/v1/post_drafts`, `/rest/v1/bookmarks`, atau `/rest/v1/post_reactions`; seluruh akses baca/tulis pribadi berjalan hanya melalui fungsi RPC tervalidasi yang mengunci identitas ke `auth.uid()` dan menegakkan `account_status` secara konsisten (termasuk memblokir mutasi tulis, komentar, dan tambah/hapus reaksi pada akun `suspended` maupun `pending_deletion`).
+3. **Anti-Korelasi Anonim, Multi-Alias, Kuota & Konten Pasca-Hapus (`[APPROVED BY FOUNDER]`):**
    - `public.posts`, `public.comments`, dan `public.aliases` tidak memiliki `owner_user_id` atau `commenter_user_id`.
+   - Satu akun dibatasi maksimal **5 alias aktif** secara bersamaan (ditegakkan di server SSR dan database).
    - Tulisan `anonymous` wajib `alias_id IS NULL` dan `public_author_label = 'Anonim'`.
-   - Komentar selalu tampil `Anonim`, tanpa alias dan tanpa badge `OP`.
-   - Pelepasan alias dan penghapusan akun mempertahankan `published_at` dan `updated_at` asli (`unsaid.suppress_updated_at = 'on'`).
+   - Komentar selalu tampil `Anonim`, tanpa alias dan tanpa badge `OP`. Tulisan yang tetap bertahan sebagai `Anonim` pasca-penghapusan akun tetap dapat menerima komentar baru sesuai aturan standar tanpa memulihkan kepemilikan.
+   - Pelepasan alias dan penghapusan akun mempertahankan `published_at` dan `updated_at` asli (`unsaid.suppress_updated_at = 'on'`). Status `suspended` memblokir aksi baru pengguna tanpa menyembunyikan tulisan lama secara otomatis.
 
 ---
 
@@ -402,6 +404,7 @@ erDiagram
 - **Proteksi Timestamp & FTS (`[TECHNICAL RECOMMENDATION]`):**
   - Trigger `trg_posts_before_update` **hanya** memperbarui `updated_at = now()` bila kolom konten (`title`, `body_markdown`, `body_plain_text`, `category_id`) berubah **DAN** `current_setting('unsaid.suppress_updated_at', true) IS DISTINCT FROM 'on'`. Pembaruan `body_plain_text` dan `search_vector` selalu disinkronkan dalam trigger yang sama ketika `title` atau `body_markdown` berubah. Pelepasan alias dan penghapusan akun tidak pernah mengubah `published_at` maupun `updated_at`.
   - Pre-flight migrasi wajib mengecek `SELECT cfgname FROM pg_ts_config WHERE cfgname = 'indonesian'`. Trigger `trg_posts_search_vector` memakai konfigurasi tervalidasi (`indonesian` jika tersedia di `pg_ts_config`, atau fallback `'simple'` + indeks GIN `pg_trgm`).
+- **Dampak Status `suspended` pada Konten Terbit (`[APPROVED BY FOUNDER]`):** Perubahan status akun penulis menjadi `'suspended'` pada `private.user_accounts` **tidak** menyembunyikan atau mengubah `moderation_status` tulisan lama secara otomatis (`public.posts` tetap `'visible'`). Konten tertentu tetap dapat ditindak moderator secara individual melalui prosedur moderasi normal (`rpc_staff_moderate_content`).
 
 #### 4. `public.comments` `[APPROVED BY FOUNDER]`
 - `id UUID PRIMARY KEY DEFAULT gen_random_uuid()`
@@ -412,6 +415,7 @@ erDiagram
 - `is_deleted_by_author BOOLEAN NOT NULL DEFAULT FALSE`
 - `created_at TIMESTAMPTZ NOT NULL DEFAULT now()`
 - **Larangan Kolom:** Tidak ada `commenter_user_id`, `alias_id`, maupun `is_op`.
+- **Komentar pada Tulisan Pasca-Hapus Akun (`[APPROVED BY FOUNDER]`):** Tulisan yang tetap bertahan sebagai `Anonim` setelah penghapusan akun penulis aslinya (`private.post_ownership` telah dihapus permanen) **tetap dapat menerima komentar baru** sesuai aturan komentar normal (`public.posts.moderation_status = 'visible'`, dan bila balasan, `parent_comment_id` berada pada post yang sama). Fungsi `public.rpc_create_comment` tidak mensyaratkan keberadaan `private.post_ownership` dan tidak pernah memulihkan hubungan kepemilikan tulisan dengan akun yang telah dihapus.
 - **Proteksi Privasi Komentar Terhapus (`[TECHNICAL RECOMMENDATION — Koreksi Audit M-1]`):** Karena `public.comments` memberi `SELECT` kepada `anon`/`authenticated` agar `public_comments_view` (`security_invoker = true`) dapat berjalan, RPC `public.rpc_delete_own_comment(p_comment_id)` **wajib menimpa langsung kolom `body_markdown = '[Komentar telah dihapus oleh penulis]'`** di tabel `public.comments` bersamaan dengan `is_deleted_by_author = TRUE` (setelah memastikan snapshot `legal_vault` dibuat terlebih dahulu apabila ada hold aktif). Dengan demikian, akses REST langsung ke `/rest/v1/comments` tidak pernah dapat membaca isi komentar asli yang telah dihapus penulis.
 
 #### 5. `public.post_reaction_stats` `[APPROVED BY FOUNDER]` + `[TECHNICAL RECOMMENDATION]`
@@ -429,9 +433,12 @@ erDiagram
 - `deletion_requested_at TIMESTAMPTZ`
 - `created_at TIMESTAMPTZ NOT NULL DEFAULT now()`
 - `updated_at TIMESTAMPTZ NOT NULL DEFAULT now()`
+- **Semantik Status `suspended` (`[APPROVED BY FOUNDER]`):**
+  - Akun dengan `account_status = 'suspended'` **dilarang keras** membuat tulisan (`rpc_publish_post`), mengedit/menghapus tulisan, membuat/menghapus komentar (`rpc_create_comment`, `rpc_delete_own_comment`), menambah maupun mencabut reaksi (`rpc_toggle_post_appreciation`), mengklaim/melepas alias (`rpc_claim_alias`, `rpc_release_own_alias`), serta memutasi draf/bookmark/laporan/banding di seluruh User Lane RPC mutasi (ditolak PostgreSQL `403 ACCOUNT_SUSPENDED` karena `account_status <> 'active'`).
+  - Status `suspended` hanya dapat ditetapkan/dicabut dari `'active'` oleh `super_admin_security` melalui jalur staf teraudit, **tidak** otomatis menyembunyikan tulisan lama pada `public.posts`, dan tidak mengganggu alur moderasi normal per konten oleh `moderator`.
 - **Mekanisme Inisialisasi / Provisioning Pengguna Baru Email OTP:**
   1. **Jalur Utama (Database Trigger):** Trigger `AFTER INSERT ON auth.users` (`private.handle_new_auth_user()`, `SECURITY DEFINER`, `SET search_path = ''`) otomatis menyisipkan `(NEW.id, 'active')` ke `private.user_accounts` (`ON CONFLICT (user_id) DO NOTHING`) pada saat `signInWithOtp(..., { shouldCreateUser: true })` menciptakan baris baru di `auth.users`.
-  2. **Jaring Pengaman SSR (Jika Trigger Skema `auth` Dibatasi di Supabase Cloud / Akun Lama):** Astro SSR Auth Callback (setelah `verifyOtp` + `getUser()`) memanggil `public.rpc_ensure_user_account()` (`authenticated` JWT). Fungsi ini memeriksa terlebih dahulu apakah terdapat `private.deletion_jobs WHERE user_id = auth.uid()` yang aktif (`state <> 'completed'`) — bila ada, **menolak provisioning ulang (`409 ACCOUNT_DELETION_IN_PROGRESS`)**; bila tidak ada dan `user_accounts` belum tercipta, menyisipkan `(auth.uid(), 'active')` secara idempoten.
+  2. **Jaring Pengaman SSR (Jika Trigger Skema `auth` Dibatasi di Supabase Cloud / Akun Lama):** Astro SSR Auth Callback (setelah `verifyOtp` + `getUser()`) memanggil `public.rpc_ensure_user_account()` (`authenticated` JWT). Fungsi ini memeriksa terlebih dahulu apakah terdapat `private.deletion_jobs WHERE user_id = auth.uid()` yang aktif (`state <> 'completed'`) — bila ada, **menolak provisioning ulang (`409 ACCOUNT_DELETION_IN_PROGRESS`)**; bila tidak ada dan `user_accounts` belum tercipta, menyisipkan `(auth.uid(), 'active')` secara idempoten (dan tidak pernah menimpa status `'suspended'` yang sudah ada).
   - *Trade-off:* Kombinasi trigger `auth.users` + fallback `rpc_ensure_user_account()` di callback login memastikan pengguna baru tidak pernah gagal di RPC penulisan, sekaligus mencegah *race condition* pembuatan ulang akun saat proses penghapusan berjalan.
 
 #### 7. `private.deletion_jobs` `[APPROVED BY FOUNDER]` + `[TECHNICAL RECOMMENDATION]`
@@ -454,6 +461,11 @@ erDiagram
 - `alias_id UUID PRIMARY KEY REFERENCES public.aliases(id) ON DELETE CASCADE`
 - `owner_user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE`
 - `claimed_at TIMESTAMPTZ NOT NULL DEFAULT now()`
+- **Kuota Maksimum 5 Alias Aktif per Akun (`[APPROVED BY FOUNDER]`):**
+  - Satu akun dibatasi memiliki **maksimal 5 alias aktif** secara bersamaan.
+  - Penegakan dilakukan secara atomik di **database** (pada `public.rpc_claim_alias` dengan *per-user advisory lock* `pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtext('unsaid_alias_quota:' || v_uid::text))` sebelum menghitung `SELECT count(*) FROM private.alias_ownership WHERE owner_user_id = v_uid` serta trigger `BEFORE/AFTER INSERT` sebagai *defense-in-depth* yang menolak `count > 5`) dan divalidasi lebih awal di **server Astro SSR**.
+  - Melepas alias (`rpc_release_own_alias`) menghapus baris di `private.alias_ownership` sehingga langsung mengosongkan 1 slot kuota (entri pada `private.alias_quarantines` tidak menghitung kuota pengguna).
+  - **Rate Limit Harian (`[TECHNICAL POLICY PENDING]`):** Batas frekuensi klaim atau pelepasan alias harian merupakan kebijakan teknis anti-penyalahgunaan yang masih harus ditentukan sebelum implementasi (tanpa menetapkan angka tetap dalam proposal ini).
 
 #### 9. `private.alias_quarantines` `[APPROVED BY FOUNDER]`
 - `id UUID PRIMARY KEY DEFAULT gen_random_uuid()`
@@ -498,7 +510,7 @@ erDiagram
 - `created_at TIMESTAMPTZ NOT NULL DEFAULT now()`
 - `UNIQUE (post_id, user_id, reaction_type)`
 - **Aturan Trigger:** Dilarang memasang trigger `AFTER DELETE` untuk mengurangi `public.post_reaction_stats`.
-- **Pola Akses Pengguna:** Status reaksi pribadi pengguna pada satu/daftar tulisan dibaca via `public.rpc_get_my_reaction_states(p_post_ids uuid[])` dan diubah via `public.rpc_toggle_post_appreciation(p_post_id)`.
+- **Pola Akses Pengguna & Batas Akun `suspended`:** Status reaksi pribadi pengguna pada satu/daftar tulisan dibaca via `public.rpc_get_my_reaction_states(p_post_ids uuid[])`. Penambahan maupun penghapusan reaksi hanya via `public.rpc_toggle_post_appreciation(p_post_id)` yang mewajibkan `account_status = 'active'` (akun `suspended` dilarang menambah maupun mencabut reaksi).
 
 #### 15. `private.reports` `[APPROVED BY FOUNDER]`
 - `id UUID PRIMARY KEY DEFAULT gen_random_uuid()`
@@ -686,7 +698,10 @@ erDiagram
      - Pada setiap transaksi HTTP melalui PostgREST, PostgREST **terlebih dahulu memverifikasi tanda tangan kriptografis JWT** memakai `JWT_SECRET` proyek Supabase dan menyuntikkan klaim terverifikasi ke GUC PostgreSQL berdurasi transaksi (`request.jwt.claims` / `request.jwt.claim.role` / `request.jwt.claim.sub`).
      - **Mengapa GUC ini tidak dapat dipalsukan oleh klien biasa:** (a) Klien hanya dapat mengirim header `Authorization: Bearer <jwt>` ke PostgREST; PostgREST menolak token dengan tanda tangan tidak valid dan menimpa GUC `request.jwt.*` pada level transaksi; (b) Klien HTTP tidak dapat menyisipkan perintah `SET request.jwt.*` atau `SET ROLE` ke dalam RPC PostgREST; (c) Pagar `REVOKE EXECUTE ... FROM PUBLIC, anon, authenticated` sudah memblokir pemanggilan `rpc_staff_*`/`rpc_legal_*`/`rpc_worker_*` dari klien biasa sejak Lapis 1.
      - **Implementasi Validasi Konteks per Jalur:**
-       - **User Lane (`private.assert_authenticated_user_context()`):** Memastikan klaim role JWT bernilai `'authenticated'` (`COALESCE(NULLIF(pg_catalog.current_setting('request.jwt.claim.role', true), ''), auth.jwt() ->> 'role') = 'authenticated'`) **DAN** `v_uid := auth.uid()` tidak NULL, lalu mengunci `private.user_accounts WHERE user_id = v_uid FOR SHARE` (`account_status = 'active'`).
+       - **User Lane (`private.assert_authenticated_user_context(p_require_active BOOLEAN DEFAULT TRUE)`):** Memastikan klaim role JWT bernilai `'authenticated'` (`COALESCE(NULLIF(pg_catalog.current_setting('request.jwt.claim.role', true), ''), auth.jwt() ->> 'role') = 'authenticated'`) **DAN** `v_uid := auth.uid()` tidak NULL, lalu mengunci `private.user_accounts WHERE user_id = v_uid FOR SHARE`.
+         - Jika `account_status IN ('pending_deletion', 'deletion_failed')`: **selalu ditolak (`409 ACCOUNT_DELETION_IN_PROGRESS`)** pada seluruh RPC workspace/baca/tulis privat (hanya `rpc_get_my_account_status` & `rpc_get_my_deletion_status` yang dapat dipanggil untuk menampilkan Recovery Screen).
+         - Jika `p_require_active = TRUE` (diterapkan seragam pada **seluruh** User Lane RPC mutasi: `rpc_publish_post`, `rpc_edit_own_post`, `rpc_delete_own_post`, `rpc_create_comment`, `rpc_delete_own_comment`, `rpc_toggle_post_appreciation` — tambah & hapus reaksi, `rpc_claim_alias`, `rpc_release_own_alias`, `rpc_upsert_my_draft`, `rpc_delete_my_draft`, `rpc_toggle_bookmark`, `rpc_submit_report`, `rpc_submit_appeal`): wajib `account_status = 'active'`, sehingga akun berstatus **`'suspended'` otomatis ditolak (`403 ACCOUNT_SUSPENDED`)**.
+         - Jika `p_require_active = FALSE` (hanya RPC baca daftar milik sendiri `rpc_list_my_*`, `rpc_get_my_draft`, `rpc_get_my_reaction_states`): akun `'suspended'` masih dapat melihat riwayatnya sendiri dalam mode *read-only*, sementara penulisan/komentar/reaksi tetap terblokir penuh.
        - **Staff Lane & Legal Lane (`private.assert_trusted_service_context()` + `private.assert_staff_role(...)`):** Memastikan klaim role JWT bernilai `'service_role'` (`COALESCE(NULLIF(pg_catalog.current_setting('request.jwt.claim.role', true), ''), auth.jwt() ->> 'role') = 'service_role'`) dan `auth.uid() IS NULL` (menjamin permintaan datang dari klien `service_role` server tanpa JWT pengguna akhir), **lalu** memvalidasi `p_actor_user_id` pada `private.staff_roles` (`revoked_at IS NULL`) dan `private.user_accounts` (`account_status = 'active'`).
        - **Worker Lane — Jalur Default MVP (`service_role` via PostgREST):** Worker menggunakan `createServerAdminClient()` (`SUPABASE_SERVICE_ROLE_KEY`, hanya di server/worker — dilarang keras di browser) dan memanggil `public.rpc_worker_*`. Wrapper `public.rpc_worker_*` memanggil `private.assert_trusted_service_context()` untuk memverifikasi klaim JWT PostgREST `'service_role'` (`auth.uid() IS NULL`), lalu mendelegasikan logika ke fungsi inti worker internal di skema `private.*` / `legal_vault.*`.
        - **Worker Lane — Opsi Lanjutan Pasca-MVP (Koneksi TCP Langsung dengan Role Khusus):** Koneksi TCP langsung **bukan jalur MVP** dan tidak menerima klaim JWT PostgREST (`request.jwt.*` bernilai `NULL`). Proposal ini **melarang** penggunaan akun superuser `postgres` sebagai koneksi default worker tanpa justifikasi dan kontrol keamanan khusus. Bila opsi TCP lanjutan diaktifkan pasca-MVP:
@@ -744,21 +759,21 @@ erDiagram
 | Nama Fungsi (`schema.name`) | Jalur | `REVOKE / GRANT EXECUTE` | Validasi Identitas & Otorisasi di Dalam SQL |
 | :--- | :--- | :--- | :--- |
 | `private.handle_new_auth_user()` *(Trigger)* | Trigger Internal (`auth.users`) | `REVOKE ALL FROM PUBLIC, anon, authenticated` | Dipanggil otomatis oleh trigger `AFTER INSERT ON auth.users`; sisipkan `(NEW.id, 'active')` `ON CONFLICT DO NOTHING`. |
-| `private.assert_authenticated_user_context()`, `private.assert_trusted_service_context()`, `private.assert_staff_role(...)` *(Helpers)* | Helper Internal | `REVOKE ALL FROM PUBLIC, anon, authenticated` | Cek klaim JWT PostgREST (`request.jwt.claim.role` / `auth.jwt() ->> 'role'`) = `'authenticated'` + `auth.uid() IS NOT NULL` (User Lane) ATAU `'service_role'` + `auth.uid() IS NULL` (Service Lane) + `private.staff_roles` (`revoked_at IS NULL`). |
+| `private.assert_authenticated_user_context(p_require_active)`, `private.assert_trusted_service_context()`, `private.assert_staff_role(...)` *(Helpers)* | Helper Internal | `REVOKE ALL FROM PUBLIC, anon, authenticated` | Cek klaim JWT PostgREST (`request.jwt.claim.role` / `auth.jwt() ->> 'role'`) = `'authenticated'` + `auth.uid() IS NOT NULL` (tolak `pending_deletion`/`deletion_failed`; jika `p_require_active=true`, tolak juga `suspended`) ATAU `'service_role'` + `auth.uid() IS NULL` + `private.staff_roles` (`revoked_at IS NULL`). |
 | `private.append_moderation_audit_log(...)`, `legal_vault.append_legal_access_log(...)` *(Helpers)* | Helper Internal | `REVOKE ALL FROM PUBLIC, anon, authenticated` | Hanya dipanggil fungsi staf/legal/worker terotorisasi; `pg_advisory_xact_lock` serialisasi `prev_hash` -> `entry_hash`. |
-| `public.rpc_ensure_user_account()` | User Lane (SSR Callback) | `REVOKE PUBLIC, anon; GRANT authenticated` | `assert_authenticated_user_context()`; tolak jika ada `deletion_jobs` aktif; insert `(v_uid, 'active')` `ON CONFLICT DO NOTHING`. |
-| `public.rpc_list_my_drafts()`, `rpc_get_my_draft(id)`, `rpc_upsert_my_draft(...)`, `rpc_delete_my_draft(id)` | User Lane (User JWT) | `REVOKE PUBLIC, anon; GRANT authenticated` | `assert_authenticated_user_context()`; lock `user_accounts FOR SHARE` (`active` saat tulis); filter `owner_user_id = v_uid`. |
-| `public.rpc_list_my_bookmarks()`, `rpc_toggle_bookmark(post_id)` | User Lane (User JWT) | `REVOKE PUBLIC, anon; GRANT authenticated` | `assert_authenticated_user_context()`; `user_accounts FOR SHARE` (`active` saat toggle); filter `user_id = v_uid`. |
-| `public.rpc_get_my_reaction_states(post_ids)`, `rpc_toggle_post_appreciation(post_id)` | User Lane (User JWT) | `REVOKE PUBLIC, anon; GRANT authenticated` | `assert_authenticated_user_context()`; cek post `visible` & `account_status = 'active'` saat toggle; update atomik `retained_appreciation_count`. |
-| `public.rpc_claim_alias(display_name)`, `rpc_release_own_alias(alias_id)`, `rpc_list_my_aliases()` | User Lane (User JWT) | `REVOKE PUBLIC, anon; GRANT authenticated` | `assert_authenticated_user_context()`; `pg_advisory_xact_lock`; cek `alias_quarantines`; cek `alias_ownership.owner_user_id = v_uid`; suppress `updated_at`. |
-| `public.rpc_publish_post(...)`, `rpc_edit_own_post(...)`, `rpc_delete_own_post(post_id)`, `rpc_list_my_posts()` | User Lane (User JWT) | `REVOKE PUBLIC, anon; GRANT authenticated` | `assert_authenticated_user_context()`; verifikasi `post_ownership.owner_user_id = v_uid` & `alias_ownership` jika `mode = 'alias'`. |
-| `public.rpc_create_comment(...)`, `rpc_delete_own_comment(comment_id)` | User Lane (User JWT) | `REVOKE PUBLIC, anon; GRANT authenticated` | `assert_authenticated_user_context()`; cek `comment_ownership.owner_user_id = v_uid`; cek hold aktif sebelum menimpa `body_markdown` + `is_deleted_by_author = true`. |
-| `public.rpc_submit_report(...)`, `rpc_list_my_reports()`, `rpc_submit_appeal(...)`, `rpc_list_my_post_moderation()` | User Lane (User JWT) | `REVOKE PUBLIC, anon; GRANT authenticated` | `assert_authenticated_user_context()`; verifikasi `post_ownership`/`comment_ownership` pada appeal; filter `reporter_user_id = v_uid`. |
-| `public.rpc_get_my_account_status()`, `rpc_get_my_deletion_status()`, `rpc_request_account_deletion(idempotency_key)` | User Lane (User JWT) | `REVOKE PUBLIC, anon; GRANT authenticated` | `assert_authenticated_user_context()`; lock `user_accounts FOR UPDATE` (`active` -> `pending_deletion`); buat `deletion_jobs` idempoten. |
+| `public.rpc_ensure_user_account()` | User Lane (SSR Callback) | `REVOKE PUBLIC, anon; GRANT authenticated` | Cek JWT `authenticated` + `v_uid := auth.uid()`; tolak jika ada `deletion_jobs` aktif; insert `(v_uid, 'active')` `ON CONFLICT DO NOTHING` (tidak menimpa `'suspended'`). |
+| `public.rpc_list_my_drafts()`, `rpc_get_my_draft(id)`, `rpc_upsert_my_draft(...)`, `rpc_delete_my_draft(id)` | User Lane (User JWT) | `REVOKE PUBLIC, anon; GRANT authenticated` | Baca: `assert_authenticated_user_context(false)` (tolak `pending_deletion`). Tulis/Hapus: `assert_authenticated_user_context(true)` (tolak `suspended` & `pending_deletion`); filter `owner_user_id = v_uid`. |
+| `public.rpc_list_my_bookmarks()`, `rpc_toggle_bookmark(post_id)` | User Lane (User JWT) | `REVOKE PUBLIC, anon; GRANT authenticated` | Baca: `assert_authenticated_user_context(false)`. Toggle: `assert_authenticated_user_context(true)` (wajib `active`, tolak `suspended`); filter `user_id = v_uid`. |
+| `public.rpc_get_my_reaction_states(post_ids)`, `rpc_toggle_post_appreciation(post_id)` | User Lane (User JWT) | `REVOKE PUBLIC, anon; GRANT authenticated` | Baca: `assert_authenticated_user_context(false)`. Toggle tambah/hapus reaksi: `assert_authenticated_user_context(true)` (wajib `active`; akun `suspended` dilarang menambah maupun mencabut reaksi); cek post `visible`; update atomik `retained_appreciation_count`. |
+| `public.rpc_claim_alias(display_name)`, `rpc_release_own_alias(alias_id)`, `rpc_list_my_aliases()` | User Lane (User JWT) | `REVOKE PUBLIC, anon; GRANT authenticated` | List: `assert_authenticated_user_context(false)`. Claim/Release: `assert_authenticated_user_context(true)` (tolak `suspended`); `rpc_claim_alias` mengunci kuota per user (`alias_quota:` lock) + tolak jika `count >= 5` (`409 ALIAS_QUOTA_EXCEEDED`) + cek `alias_quarantines`; `rpc_release_own_alias` cek `owner_user_id = v_uid` & suppress `updated_at`. |
+| `public.rpc_publish_post(...)`, `rpc_edit_own_post(...)`, `rpc_delete_own_post(post_id)`, `rpc_list_my_posts()` | User Lane (User JWT) | `REVOKE PUBLIC, anon; GRANT authenticated` | List: `assert_authenticated_user_context(false)`. Publish/Edit/Delete: `assert_authenticated_user_context(true)` (wajib `active`; akun `suspended` dilarang membuat/mengubah tulisan); verifikasi `post_ownership.owner_user_id = v_uid` & `alias_ownership` jika `mode = 'alias'`. |
+| `public.rpc_create_comment(...)`, `rpc_delete_own_comment(comment_id)` | User Lane (User JWT) | `REVOKE PUBLIC, anon; GRANT authenticated` | `assert_authenticated_user_context(true)` (wajib `active`; akun `suspended` dilarang berkomentar/menghapus komentar); `create_comment` hanya cek post target `moderation_status = 'visible'` (tanpa butuh `post_ownership`, sehingga post `Anonim` pasca-hapus akun tetap menerima komentar normal); `delete_own_comment` cek `comment_ownership` + hold aktif sebelum menimpa `body_markdown`. |
+| `public.rpc_submit_report(...)`, `rpc_list_my_reports()`, `rpc_submit_appeal(...)`, `rpc_list_my_post_moderation()` | User Lane (User JWT) | `REVOKE PUBLIC, anon; GRANT authenticated` | List: `assert_authenticated_user_context(false)`. Submit report/appeal: `assert_authenticated_user_context(true)` (wajib `active`, tolak `suspended`); verifikasi `*_ownership` pada appeal; filter `reporter_user_id = v_uid`. |
+| `public.rpc_get_my_account_status()`, `rpc_get_my_deletion_status()`, `rpc_request_account_deletion(idempotency_key)` | User Lane (User JWT) | `REVOKE PUBLIC, anon; GRANT authenticated` | Status akun/job: cek JWT `authenticated` + `auth.uid() IS NOT NULL`. Request deletion: lock `user_accounts FOR UPDATE` (`active` -> `pending_deletion`); buat `deletion_jobs` idempoten (tanpa RPC pembatalan). |
 | `public.rpc_staff_list_moderation_queue(p_actor_user_id, ...)` & `rpc_staff_list_appeals(p_actor_user_id, ...)` | Staff Lane (`service_role`) | `REVOKE PUBLIC, anon, authenticated; GRANT service_role` | `assert_trusted_service_context()` + `assert_staff_role(p_actor_user_id, ARRAY['moderator'])`; mengembalikan **nol** `reporter_user_id`, `appellant_user_id`, atau `*_ownership`. |
-| `public.rpc_staff_moderate_content(p_actor_user_id, ...)` & `rpc_staff_resolve_appeal(p_actor_user_id, ...)` | Staff Lane (`service_role`) | `REVOKE PUBLIC, anon, authenticated; GRANT service_role` | `assert_trusted_service_context()` + `assert_staff_role(p_actor_user_id, ARRAY['moderator'])`; catat `moderation_actions` + `append_moderation_audit_log(...)`. |
+| `public.rpc_staff_moderate_content(p_actor_user_id, ...)` & `rpc_staff_resolve_appeal(p_actor_user_id, ...)` | Staff Lane (`service_role`) | `REVOKE PUBLIC, anon, authenticated; GRANT service_role` | `assert_trusted_service_context()` + `assert_staff_role(p_actor_user_id, ARRAY['moderator'])`; tetap dapat menindak konten dari akun aktif, `suspended`, maupun terhapus secara normal; catat `moderation_actions` + `append_moderation_audit_log(...)`. |
 | `public.rpc_staff_manage_category(p_actor_user_id, ...)` & `rpc_staff_get_ops_metrics(p_actor_user_id)` | Staff Lane (`service_role`) | `REVOKE PUBLIC, anon, authenticated; GRANT service_role` | `assert_trusted_service_context()` + `assert_staff_role(p_actor_user_id, ARRAY['operational_admin','super_admin_security'])`; agregat non-PII & status teknis job saja. |
-| `public.rpc_staff_list_audit_logs(p_actor_user_id, ...)` & `rpc_staff_manage_role(p_actor_user_id, ...)` | Staff Lane (`service_role`) | `REVOKE PUBLIC, anon, authenticated; GRANT service_role` | `assert_trusted_service_context()` + `assert_staff_role(...)`; `list_audit_logs` memfilter scope per tier staf; `manage_role` khusus `super_admin_security` + wajib tulis audit log. |
+| `public.rpc_staff_list_audit_logs(p_actor_user_id, ...)`, `rpc_staff_manage_role(p_actor_user_id, ...)`, `rpc_staff_set_account_suspension(p_actor_user_id, ...)` | Staff Lane (`service_role`) | `REVOKE PUBLIC, anon, authenticated; GRANT service_role` | `assert_trusted_service_context()` + `assert_staff_role(...)`; `manage_role` & `set_account_suspension` (`'active' <-> 'suspended'` tanpa menyembunyikan `public.posts` lama) khusus `super_admin_security` + wajib tulis audit log. |
 | `public.rpc_legal_manage_hold(p_actor_user_id, ...)`, `rpc_legal_manage_access_request(p_actor_user_id, ...)`, `rpc_legal_list_access_logs(p_actor_user_id, ...)` | Legal Lane (`service_role`) | `REVOKE PUBLIC, anon, authenticated; GRANT service_role` | `assert_trusted_service_context()` + `assert_staff_role(...)`; pengajuan/pengelolaan hold oleh `privacy_legal_officer`; co-approval (`approved_by <> requested_by`) oleh `privacy_legal_officer` ke-2 atau `super_admin_security`; catat `append_legal_access_log(...)`. |
 | `public.rpc_legal_access_snapshot(p_actor_user_id, p_request_id, ...)` | Legal Lane (`service_role`) | `REVOKE PUBLIC, anon, authenticated; GRANT service_role` | `assert_trusted_service_context()` + **`assert_staff_role(p_actor_user_id, ARRAY['privacy_legal_officer'])` ONLY**; wajib `sensitive_access_requests` `approved`, `approved_by <> requested_by`, `expires_at > now()`; catat `append_legal_access_log(...)`. |
 | `public.rpc_worker_claim_deletion_jobs(...)`, `rpc_worker_get_active_holds_for_user(p_user_id)`, `rpc_worker_store_legal_snapshot(...)`, `rpc_worker_execute_db_unlink(...)`, `rpc_worker_mark_deletion_state(...)`, `rpc_worker_purge_expired_data()`, `rpc_worker_get_audit_chain_tip()` | Worker Lane MVP (`service_role` via PostgREST) | `REVOKE PUBLIC, anon, authenticated; GRANT service_role` | **Jalur MVP default:** `assert_trusted_service_context()`; `FOR UPDATE SKIP LOCKED`; `execute_db_unlink` cek kelengkapan snapshot hold lintas entitas; `get_audit_chain_tip` membaca ujung rantai untuk *external signed checkpoint*. *(Opsi TCP lanjutan pasca-MVP tidak memanggil wrapper ini, melainkan fungsi inti worker terbatas oleh role khusus `unsaid_worker_role` `NOSUPERUSER NOBYPASSRLS` — bukan `postgres`.)* |
@@ -802,6 +817,7 @@ erDiagram
 2. **Aturan Mutasi:**
    - **Saat pengguna aktif memberi apresiasi (`rpc_toggle_post_appreciation`):** menyisipkan baris `(post_id, v_uid)` ke `private.post_reactions` dan menaikkan `retained_appreciation_count` sebesar **`+1`**.
    - **Saat pengguna aktif mencabut apresiasinya (`rpc_toggle_post_appreciation`):** menghapus baris `(post_id, v_uid)` dari `private.post_reactions` dan menurunkan `retained_appreciation_count` sebesar **`-1`** (`GREATEST(0, retained_appreciation_count - 1)`).
+   - **Saat akun berstatus `suspended` (`[APPROVED BY FOUNDER]`):** `rpc_toggle_post_appreciation` menolak baik penambahan (`+1`) maupun penghapusan (`-1`) reaksi melalui `assert_authenticated_user_context(true)` (`403 ACCOUNT_SUSPENDED`).
    - **Saat akun pemberi apresiasi dihapus (`db_unlinked`):** seluruh baris miliknya di `private.post_reactions` dihapus permanen (`DELETE FROM private.post_reactions WHERE user_id = p_user_id`), **sementara `public.post_reaction_stats.retained_appreciation_count` TIDAK diubah**.
 3. **Pencegahan Decrement Tidak Disengaja & Kebocoran Korelasi:**
    - **Dilarang keras** memasang trigger `AFTER DELETE ON private.post_reactions` untuk mengurangi `post_reaction_stats`. Karena tidak ada trigger `AFTER DELETE`, penghapusan massal baris `private.post_reactions` saat penghapusan akun tidak pernah memicu penurunan angka publik dan tidak menciptakan korelasi waktu antara penghapusan akun dengan perubahan tulisan orang lain.
@@ -810,13 +826,22 @@ erDiagram
 
 ---
 
-## 7. Alias Release Transaction `[APPROVED BY FOUNDER]`
+## 7. Alias Quota, Claim & Release Transaction `[APPROVED BY FOUNDER]`
+
+### A. Penegakan Kuota Maksimal 5 Alias Aktif per Akun & Kebijakan Rate Limit
+- **Kuota Maksimum (`[APPROVED BY FOUNDER]`):** Setiap akun (`private.user_accounts.account_status = 'active'`) dibatasi memiliki **maksimal 5 alias aktif secara bersamaan** di `private.alias_ownership`.
+- **Penegakan Ganda (Server SSR + Database):**
+  1. Server Astro SSR memeriksa jumlah alias aktif pengguna sebelum memanggil RPC klaim untuk respons UX yang cepat.
+  2. Di database PostgreSQL, `public.rpc_claim_alias(p_display_name)` memanggil `assert_authenticated_user_context(true)` (`account_status = 'active'`, tolak `suspended`/`pending_deletion`), mengambil *per-user advisory lock* `pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtext('unsaid_alias_quota:' || v_uid::text))`, menghitung `SELECT count(*) FROM private.alias_ownership WHERE owner_user_id = v_uid`, dan langsung menolak dengan `409 ALIAS_QUOTA_EXCEEDED` bila jumlah sudah `>= 5` (didukung trigger guard pada `private.alias_ownership` sebagai *defense-in-depth*).
+  3. Urutan penguncian bersifat deterministik (`user_accounts FOR SHARE` -> `alias_quota:<v_uid>` -> `alias_name:<v_normalized_name>`) agar tidak terjadi *deadlock* maupun *race condition* ketika dua permintaan klaim paralel dikirim oleh akun yang sama.
+- **Rate Limit Klaim / Pelepasan Harian (`[TECHNICAL POLICY PENDING]`):** Batas frekuensi klaim atau pelepasan alias per hari belum ditetapkan angkanya dan dicatat sebagai kebijakan teknis anti-penyalahgunaan yang wajib difinalisasi sebelum implementasi produksi.
+
+### B. Alur Pelepasan Alias (`public.rpc_release_own_alias(p_alias_id UUID)`)
 
 Saat pengguna aktif melepas salah satu alias melalui Astro SSR (`userClient`) -> `public.rpc_release_own_alias(p_alias_id UUID)`:
 
 1. **Validasi Identitas & Concurrency Lock:**
-   - `v_uid := auth.uid();` (harus NOT NULL).
-   - Kunci `private.user_accounts WHERE user_id = v_uid FOR SHARE` dan pastikan `account_status = 'active'`.
+   - `assert_authenticated_user_context(true)` memastikan `v_uid := auth.uid()` tidak NULL dan `private.user_accounts.account_status = 'active'` (menolak akun `suspended` maupun `pending_deletion`).
    - Kunci `private.alias_ownership WHERE alias_id = p_alias_id AND owner_user_id = v_uid FOR UPDATE`. Bila tidak ditemukan, tolak (`403/404`).
    - Kunci `public.aliases WHERE id = p_alias_id FOR UPDATE` untuk membaca `normalized_name`.
 2. **Konversi Tulisan Historis ke `Anonim` Tanpa Mengubah Timestamp:**
@@ -839,10 +864,10 @@ Saat pengguna aktif melepas salah satu alias melalui Astro SSR (`userClient`) ->
      ```
 3. **Karantina 30 Hari Tanpa Identitas Pemilik Lama:**
    - Masukkan `normalized_name` ke `private.alias_quarantines` dengan `quarantined_until = now() + interval '30 days'`. Tidak ada kolom `former_owner_user_id`.
-4. **Penghapusan Kepemilikan & Alias:**
-   - Hapus baris dari `private.alias_ownership` dan `public.aliases`.
+4. **Penghapusan Kepemilikan & Alias (Membebaskan 1 Slot Kuota):**
+   - Hapus baris dari `private.alias_ownership` (langsung mengosongkan 1 slot dari batas 5 alias aktif) dan `public.aliases`.
 5. **Klaim Ulang (`public.rpc_claim_alias`):**
-   - Mengambil `pg_advisory_xact_lock(hashtext(v_normalized_name))`, menghapus entri karantina yang sudah kedaluwarsa (`quarantined_until <= now()`), menolak **semua** akun termasuk mantan pemilik jika masih ada karantina aktif, dan mengizinkan siapa pun mengklaim setelah 30 hari berlalu.
+   - Setelah memeriksa kuota `<= 5` dengan `alias_quota:<v_uid>`, mengambil `pg_advisory_xact_lock(hashtext('alias_name:' || v_normalized_name))`, menghapus entri karantina yang sudah kedaluwarsa (`quarantined_until <= now()`), menolak **semua** akun termasuk mantan pemilik jika masih ada karantina aktif, dan mengizinkan siapa pun mengklaim setelah 30 hari berlalu.
 
 ---
 
@@ -896,10 +921,10 @@ Saat pengguna aktif melepas salah satu alias melalui Astro SSR (`userClient`) ->
    - Seluruh mutasi di `rpc_worker_execute_db_unlink` mengalami **`ROLLBACK` penuh** di PostgreSQL. Tidak ada sebagian draf yang terhapus atau sebagian alias yang terlepas.
    - `private.deletion_jobs` mencatat `state = 'failed_retryable'` (atau `'failed_manual_intervention'` jika fatal/habis kuota percobaan) dengan `last_reached_checkpoint = 'auth_session_revoked'`.
    - **Cara Worker Melanjutkan:** Background worker memilih baris dengan `FOR UPDATE SKIP LOCKED` saat `next_retry_at <= now()`, memeriksa apakah ada hold aktif baru (`rpc_worker_get_active_holds_for_user`), membuat snapshot terenkripsi jika diperlukan, dan mengulang Step 2 secara idempoten.
-   - **Cara Pengguna Melanjutkan Secara Aman:** Karena `auth.users` belum dihapus atau di-ban permanen, jika pengguna meminta Email OTP baru sebelum `db_unlinked`, Astro SSR mendeteksi `account_status IN ('pending_deletion', 'deletion_failed')` dengan `last_reached_checkpoint <> 'db_unlinked'`. SSR **menolak seluruh akses workspace/penulisan** dan menampilkan **Halaman Status & Pemulihan Penghapusan Akun** di mana pengguna dapat menekan **"Lanjutkan Penghapusan Akun"** (memicu ulang `deletion_jobs` yang sama secara aman tanpa membuat duplikat job).
+   - **Cara Pengguna Melanjutkan Secara Aman — Tanpa Opsi Pembatalan (`[APPROVED BY FOUNDER]`):** Karena `auth.users` belum dihapus atau di-ban permanen, jika pengguna meminta Email OTP baru sebelum `db_unlinked`, Astro SSR mendeteksi `account_status IN ('pending_deletion', 'deletion_failed')` dengan `last_reached_checkpoint <> 'db_unlinked'`. SSR **menolak seluruh akses workspace/penulisan** dan menampilkan **Halaman Status & Pemulihan Penghapusan Akun (*Recovery Screen*)** di mana pengguna **hanya dapat menekan "Lanjutkan Penghapusan Akun"** (memicu ulang `deletion_jobs` yang sama secara aman & idempoten tanpa membuat duplikat job). **Tidak tersedia opsi pembatalan penghapusan** baik di UI maupun pada RPC database (`tidak ada rpc_cancel_account_deletion`).
 2. **Cara Pemblokiran Permintaan & Penulisan Paralel (`Concurrency Guard`):**
    - Segera saat `rpc_request_account_deletion` berjalan, fungsi mengunci baris `private.user_accounts WHERE user_id = v_uid FOR UPDATE` dan mengubah `account_status = 'pending_deletion'`.
-   - **Seluruh** RPC penulisan pengguna (`post_drafts`, `claim_alias`, `release_alias`, `publish_post`, `edit_post`, `delete_post`, `comments`, `bookmarks`, `post_reactions`, `reports`, `appeals`) di awal transaksinya mengunci `private.user_accounts WHERE user_id = v_uid FOR SHARE` dan memvalidasi `account_status = 'active'`.
+   - **Seluruh** RPC penulisan/mutasi pengguna (`post_drafts`, `claim_alias`, `release_alias`, `publish_post`, `edit_post`, `delete_post`, `comments`, `bookmarks`, `post_reactions`, `reports`, `appeals`) di awal transaksinya mengunci `private.user_accounts WHERE user_id = v_uid FOR SHARE` via `assert_authenticated_user_context(true)` dan memvalidasi `account_status = 'active'` (menolak baik `pending_deletion`/`deletion_failed` maupun `suspended`).
    - Mekanisme `FOR UPDATE` vs `FOR SHARE` menjamin serialisasi di tingkat kunci baris PostgreSQL: penulisan paralel yang sempat masuk lebih dulu akan selesai *sebelum* `pending_deletion` ter-commit (sehingga pasti terhapus pada Step 2), sedangkan setiap permintaan yang datang sesudah atau menunggu kunci langsung gagal dengan `409 ACCOUNT_DELETION_IN_PROGRESS`.
 3. **Jaminan Idempotensi Saat Retry:**
    - Partial unique index `uq_deletion_jobs_active_user ON private.deletion_jobs (user_id) WHERE state <> 'completed'` mencegah job ganda.
@@ -910,8 +935,9 @@ Saat pengguna aktif melepas salah satu alias melalui Astro SSR (`userClient`) ->
    - Worker melakukan retry terjadwal (`failed_retryable`) dengan *exponential backoff*.
    - Jika pengguna mencoba masuk ulang lewat OTP saat jeda retry pasca-`db_unlinked`, Astro SSR melihat `last_reached_checkpoint = 'db_unlinked'`, **memblokir total sesi tersebut** (`410 ACCOUNT_UNLINKED_FINALIZING_DELETION`), mencabut sesi seketika dengan `signOut(newSessionAccessToken, 'global')`, dan langsung memicu eksekusi `auth.admin.deleteUser(user_id)`.
    - Bila batas maksimum percobaan habis (`failed_manual_intervention`), status `user_accounts.account_status` disetel ke `'deletion_failed'` dan alert dikirim ke `super_admin_security` / `operational_admin`.
-5. **Cara Kerja Intervensi Manual Tanpa Memulihkan Tautan Kepemilikan:**
+5. **Cara Kerja Intervensi Manual & Status Konten Pasca-`db_unlinked` (`[APPROVED BY FOUNDER]`):**
    - **Aturan Mutlak:** Setelah `db_unlinked` ter-commit, tautan privat (`post_ownership`, `comment_ownership`, `alias_ownership`) telah terhapus permanen dan **dilarang keras** direkonstruksi atau dipulihkan kembali.
+   - **Komentar pada Tulisan `Anonim` Pasca-Hapus Akun:** Tulisan yang dipertahankan sebagai `Anonim` pasca-`db_unlinked` **tetap dapat menerima komentar baru** dari pengguna aktif melalui `rpc_create_comment` dengan aturan komentar normal (`moderation_status = 'visible'`), tanpa pernah memulihkan relasi `post_ownership`.
    - Intervensi manual oleh `super_admin_security` terbatas pada:
      1. Melihat diagnostik teknis `private.deletion_jobs` (`id`, `user_id`, `state`, `last_reached_checkpoint`, `last_error_code`, `last_error_detail` — tanpa email maupun daftar tulisan).
      2. Mengatasi hambatan eksternal di Supabase Auth (mis. kegagalan faktor Passkey/identitas Auth atau gangguan API) dan menjalankan ulang langkah `auth.admin.deleteUser(user_id)` via konsol/CLI teraudit untuk menuntaskan transisi `db_unlinked → auth_deleted → completed`.
@@ -925,10 +951,10 @@ Tier staf didefinisikan sebagai aplikasi RBAC di `private.staff_roles` dan diteg
 
 | Tier (`private.staff_roles.role`) | Cakupan Wewenang | Data yang Boleh Diakses (Melalui RPC Ter-sanitasi) | Data yang **Dilarang Keras** Diakses | Kontrol Tambahan |
 | :--- | :--- | :--- | :--- | :--- |
-| **1. `moderator`** | Review laporan, `hide`/`restore`/`remove` konten, tanggapi banding berdasarkan isi & kebijakan. | Konten post/komentar terlapor, `reason_code`, `explanation`, histori moderasi konten, teks `appeal_statement`. | `email`, `auth.users`, `reporter_user_id`, `appellant_user_id`, `post_ownership`, `comment_ownership`, `alias_ownership`, `post_drafts`, `legal_vault.*`. | RPC moderasi secara struktural membuang identitas pelapor/penulis; moderator tidak dapat mencari tulisan lain milik akun yang sama. |
+| **1. `moderator`** | Review laporan, `hide`/`restore`/`remove` konten, tanggapi banding berdasarkan isi & kebijakan (termasuk konten milik akun `suspended` atau telah dihapus). | Konten post/komentar terlapor, `reason_code`, `explanation`, histori moderasi konten, teks `appeal_statement`. | `email`, `auth.users`, `reporter_user_id`, `appellant_user_id`, `post_ownership`, `comment_ownership`, `alias_ownership`, `post_drafts`, `legal_vault.*`. | RPC moderasi secara struktural membuang identitas pelapor/penulis; moderator tidak dapat mencari tulisan lain milik akun yang sama. |
 | **2. `operational_admin`** | Kelola `categories`, pantau antrean `deletion_jobs` dan metrik kesehatan sistem non-PII. | `categories`, statistik agregat non-identitas, status teknis `deletion_jobs`. | `post_drafts`, `post_ownership`, `alias_ownership`, `email`, isi laporan/banding sensitif, `legal_vault.*`. | Setiap perubahan kategori/konfigurasi dicatat di log audit operasional. |
 | **3. `privacy_legal_officer`** | Kelola `legal_preservation_holds` dan proses permintaan data sah sesuai hukum. | **Hanya** metadata hold dan snapshot terdekripsi di dalam scope `legal_preservation_holds` + `sensitive_access_requests` yang sudah `approved` dan belum kedaluwarsa. | Penjelajahan bebas lintas akun/tulisan di luar scope surat perintah sah. | Wajib tujuan terdokumentasi, data minimum, **two-person approval** (`approved_by <> requested_by`), kedaluwarsa otomatis, & audit log *tamper-evident*. |
-| **4. `super_admin_security`** | Manajemen `staff_roles`, respons insiden kritis, pemulihan kegagalan `deletion_jobs`, dan *co-approver* akses sensitif. | Konfigurasi keamanan, log audit, diagnostik `deletion_jobs`, manajemen `staff_roles`. | Dilarang membuka identitas penulis tanpa `sensitive_access_requests` berotorisasi & *two-person approval*. | Akses darurat/pemulihan tetap masuk ke `legal_access_logs` / `moderation_audit_logs`. |
+| **4. `super_admin_security`** | Manajemen `staff_roles`, penetapan status `suspended` akun (`rpc_staff_set_account_suspension`), respons insiden kritis, pemulihan kegagalan `deletion_jobs`, dan *co-approver* akses sensitif. | Konfigurasi keamanan, log audit, diagnostik `deletion_jobs`, manajemen `staff_roles`. | Dilarang membuka identitas penulis tanpa `sensitive_access_requests` berotorisasi & *two-person approval*. Penetapan `suspended` tidak otomatis menyembunyikan `public.posts`. | Akses darurat/pemulihan/suspensi tetap masuk ke `legal_access_logs` / `moderation_audit_logs`. |
 
 ---
 
@@ -998,6 +1024,7 @@ Tier staf didefinisikan sebagai aplikasi RBAC di `private.staff_roles` dan diteg
 | **Lockout permanen, unlink parsial, atau benturan `CHECK` saat hapus akun** | Rollback penuh jika DB gagal pra-`db_unlinked`; retry worker idempoten + recovery screen pra-`db_unlinked`; `FOR SHARE` vs `FOR UPDATE` memblokir penulisan paralel; redaksi banding memakai placeholder >= 10 karakter + `is_redacted_by_deletion`; `db_unlinked` memblokir rekonstruksi ownership selamanya. |
 | **Manipulasi audit log oleh DBA/superuser & TOCTOU / kebocoran `legal_vault`** | Penulisan log memakai `pg_advisory_xact_lock`, verifikasi rantai `ORDER BY seq_id ASC` (`prev_hash` antarbaris *committed* yang tahan *sequence gap* normal), ditambah **External Signed Checkpoints** ke penyimpanan WORM eksternal dengan `AUDIT_CHECKPOINT_SIGNING_KEY` di luar PostgreSQL; hold lintas entitas diperiksa ulang di dalam `db_unlinked` (`SNAPSHOT_REQUIRED`); snapshot memakai enkripsi **AES-256-GCM** dengan KEK eksternal; `purge_after` tersinkronisasi saat hold diperpanjang/dilepas. |
 | **Korelasi waktu penghapusan akun melalui angka reaksi atau `updated_at`** | `post_reaction_stats.retained_appreciation_count` tidak berkurang saat akun dihapus (tanpa trigger `AFTER DELETE`), dan `posts.updated_at` ditekan oleh `unsaid.suppress_updated_at = 'on'` saat rilis alias/hapus akun. |
+| **Penyalahgunaan akun `suspended` atau *race condition* melewati kuota 5 alias** | `assert_authenticated_user_context(true)` mewajibkan `account_status = 'active'` di seluruh User Lane RPC mutasi (memblokir tulis, komentar, serta tambah/hapus reaksi pada akun `suspended`), tanpa menyembunyikan `public.posts` lama. `rpc_claim_alias` memakai kunci `alias_quota:<v_uid>` + hitungan atomik `<= 5` (+ trigger guard). |
 | **Asumsi keliru `indonesian` FTS** | Wajib pre-flight `pg_ts_config` sebelum migrasi; fallback otomatis ke `'simple'` + `pg_trgm`. |
 
 ---
@@ -1026,13 +1053,17 @@ Tier staf didefinisikan sebagai aplikasi RBAC di `private.staff_roles` dan diteg
    - Uji **Deletion Concurrency & Failure Recovery (`C-2`, `M-3`, `M-4`):**
      - Balapan penulisan draf/komentar (`FOR SHARE`) vs `rpc_request_account_deletion` (`FOR UPDATE`) -> zero orphan records.
      - Simulasi `signOut(jwt)` gagal/kedaluwarsa -> token lama tetap ditolak seluruh RPC privat karena `account_status = 'pending_deletion'`.
-     - Simulasi `auth_session_revoked` sukses lalu kegagalan DB pada Step 2 (termasuk kasus pengguna memiliki `moderation_appeals` aktif -> verifikasi redaksi `appeal_statement` memenuhi `CHECK >= 10` karakter) -> rollback utuh pra-`db_unlinked`, lalu pemulihan sukses hingga `completed`.
+     - Simulasi `auth_session_revoked` sukses lalu kegagalan DB pada Step 2 (termasuk kasus pengguna memiliki `moderation_appeals` aktif -> verifikasi redaksi `appeal_statement` memenuhi `CHECK >= 10` karakter) -> rollback utuh pra-`db_unlinked`; verifikasi re-login OTP membuka Recovery Screen **hanya** untuk **"Lanjutkan Penghapusan Akun"** (tanpa opsi/RPC pembatalan) hingga `completed`.
      - Simulasi hold baru disetujui paralel di antara pengecekan worker dan `db_unlinked` -> `rpc_worker_execute_db_unlink` mengembalikan `SNAPSHOT_REQUIRED` hingga snapshot terenkripsi selesai dibuat.
+   - Uji **Kuota Alias (Maks 5), Komentar Pasca-Hapus & Status `suspended` (`[APPROVED BY FOUNDER]`):**
+     - Balapan paralel `rpc_claim_alias` oleh 1 akun -> maksimal **5 alias aktif** diizinkan (`6th` ditolak `409 ALIAS_QUOTA_EXCEEDED` di server & DB); melepas 1 alias membuka kembali 1 slot tanpa menghitung entri `alias_quarantines`.
+     - Tulisan `Anonim` peninggalan akun yang sudah dihapus (`db_unlinked`/`completed`) tetap berhasil menerima komentar baru via `rpc_create_comment` tanpa memulihkan `post_ownership`.
+     - Akun berstatus `suspended` **ditolak (`403 ACCOUNT_SUSPENDED`)** pada `rpc_publish_post`, `rpc_edit_own_post`, `rpc_create_comment`, `rpc_delete_own_comment`, `rpc_toggle_post_appreciation` (baik tambah `+1` maupun cabut `-1`), `rpc_claim_alias`, `rpc_release_own_alias`, serta mutasi draf/bookmark; seluruh `public.posts` lamanya tetap `'visible'`, dan `rpc_staff_moderate_content` tetap dapat menyembunyikan/menghapus konten pelanggaran secara normal.
    - Uji **Reaksi & Timestamp:** Verifikasi `retained_appreciation_count` berkurang `-1` saat user aktif mencabut apresiasi, **tetap tidak berubah** saat akun dihapus (`private.post_reactions` terhapus), serta `published_at` dan `updated_at` tidak berubah.
    - Uji **Legal Preservation Encryption:** Verifikasi `legal_preservation_snapshots` menyimpan ciphertext `BYTEA`, wajib two-person approval saat dekripsi, menyinkronkan `purge_after` saat `expires_at` hold diperpanjang, dan terhapus otomatis saat `purge_after` lewat.
    - Uji pre-flight `pg_ts_config` untuk pencarian teks Bahasa Indonesia.
 3. **Playwright E2E Tests:**
-   - Alur lengkap Email OTP (pengguna baru) -> buat draf -> klaim alias -> terbit Anonim & Alias -> rilis alias (post jadi `Anonim`, karantina 30 hari berlaku bagi pemilik lama) -> komentar Anonim & hapus komentar -> apresiasi & cabut apresiasi -> lapor & review moderator/banding -> hapus akun & verifikasi tulisan publik tetap tersedia sebagai `Anonim`.
+   - Alur lengkap Email OTP (pengguna baru) -> buat draf -> klaim hingga 5 alias -> terbit Anonim & Alias -> rilis alias (post jadi `Anonim`, kuota kembali 4, karantina 30 hari berlaku bagi pemilik lama) -> komentar Anonim & hapus komentar -> apresiasi & cabut apresiasi -> uji akun `suspended` (blokir tulis/komentar/reaksi, post lama tetap tampil kecuali dimoderasi) -> lapor & review moderator/banding -> hapus akun (termasuk skenario recovery lanjut-saja pra-`db_unlinked`) & verifikasi tulisan publik tetap tersedia sebagai `Anonim` dan masih menerima komentar baru.
 
 ---
 
@@ -1044,14 +1075,16 @@ Tier staf didefinisikan sebagai aplikasi RBAC di `private.staff_roles` dan diteg
 3. Kewenangan penghapusan atau redaksi wajib untuk pelanggaran berat (mis. CSAM atau doxxing berbahaya) saat ada permintaan hapus akun atau kewajiban hukum tertentu.
 4. Konfirmasi hukum apakah snapshot hold bertipe `'user'` wajib mencakup `auth_identity` (`email` dari `auth.users`) sebelum `auth.admin.deleteUser(user_id)` dijalankan.
 
-### B. Items Still Requiring Founder Approval (`[REQUIRES FOUNDER APPROVAL]`)
-1. **Batas Kuota Alias & Rate Limit Harian:** Penetapan batas maksimum alias aktif per akun (mis. 5 alias aktif) serta batas frekuensi klaim/rilis harian.
-2. **Kebijakan Komentar pada Tulisan Milik Akun Terhapus:** Konfirmasi apakah tulisan yang ditinggalkan sebagai `Anonim` pasca-hapus akun tetap dapat menerima komentar baru sesuai aturan standar.
-3. **Kebijakan Pembatalan Penghapusan Sebelum `db_unlinked`:** Konfirmasi apakah pengguna yang mengalami kegagalan teknis sebelum `db_unlinked` pada Recovery Screen hanya boleh melanjutkan penghapusan atau juga diizinkan membatalkan penghapusan akunnya.
-4. **Dampak `suspended` Account pada Konten Terbit:** Konfirmasi apakah status `suspended` oleh Super Admin/keamanan hanya memblokir penulisan baru atau juga otomatis menyembunyikan seluruh tulisan aktif melalui proses moderasi.
+### B. Founder Approval Status (Seluruh 4 Item Telah Diputuskan — `[APPROVED BY FOUNDER]`)
+Keempat pertanyaan produk/tata kelola sebelumnya telah disetujui secara resmi oleh Founder dan terintegrasi di seluruh proposal ini (tidak ada item `[REQUIRES FOUNDER APPROVAL]` tersisa):
+1. **Kuota Maksimum Alias Aktif (`[APPROVED BY FOUNDER]`):** Maksimal **5 alias aktif per akun**, ditegakkan di database dan server. *(Catatan: Rate limit klaim/rilis alias harian dipindahkan ke daftar `[TECHNICAL POLICY PENDING]` pada Bagian 15.C.)*
+2. **Komentar Setelah Penghapusan Akun (`[APPROVED BY FOUNDER]`):** Tulisan `Anonim` yang dipertahankan pasca-hapus akun tetap dapat menerima komentar baru dengan aturan normal tanpa memulihkan hubungan kepemilikan.
+3. **Recovery Penghapusan Akun Pra-`db_unlinked` (`[APPROVED BY FOUNDER]`):** Pengguna hanya dapat **melanjutkan** penghapusan melalui Recovery Screen (**tidak ada** opsi pembatalan); pasca-`db_unlinked` tidak ada pemulihan kepemilikan akun maupun konten.
+4. **Kebijakan Akun `suspended` (`[APPROVED BY FOUNDER]`):** Akun `suspended` dilarang membuat tulisan, komentar, atau menambah/menghapus reaksi; tulisan lama tidak disembunyikan otomatis dan tetap dapat dimoderasi secara normal oleh moderator.
 
-### C. Technical Prerequisites Before TASK 004B / SQL Implementation
+### C. Technical Prerequisites & Policies Pending Before TASK 004B / SQL Implementation
 1. Penyediaan proyek Supabase live beserta `PUBLIC_SUPABASE_URL`, `PUBLIC_SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, KMS / `LEGAL_VAULT_KEK`, `AUDIT_CHECKPOINT_SIGNING_KEY`, dan bucket WORM untuk checkpoint audit log.
 2. Verifikasi pre-flight database target: `SELECT cfgname FROM pg_ts_config WHERE cfgname = 'indonesian';`, perilaku aktual `auth.role()` / `request.jwt.claim.role` / `auth.jwt()` pada koneksi PostgREST (`authenticator`), izin pembuatan trigger `AFTER INSERT ON auth.users`, izin opsi role `unsaid_app_definer` vs `postgres` (serta kebijakan pembuatan role DB khusus `unsaid_worker_role` bila opsi TCP lanjutan diaktifkan pasca-MVP), dan mekanisme pencabutan sesi server-side GoTrue jika dibutuhkan selain `signOut(jwt)`.
-3. Konfigurasi SMTP OTP Email Bahasa Indonesia serta keputusan aktivasi *feature flag* Passkeys Beta (`RP ID`, `RP Name`, `RP Origins`).
-4. Review akhir Project Manager (ChatGPT) dan persetujuan eksplisit Founder atas dokumen revisi ini sebelum migrasi SQL di TASK 004B dimulai.
+3. **`[TECHNICAL POLICY PENDING]` Penetapan Rate Limit Harian Alias:** Menentukan batas frekuensi klaim dan pelepasan alias harian anti-penyalahgunaan pada layer server/DB sebelum implementasi TASK 004B (angka belum ditetapkan di proposal arsitektur ini).
+4. Konfigurasi SMTP OTP Email Bahasa Indonesia serta keputusan aktivasi *feature flag* Passkeys Beta (`RP ID`, `RP Name`, `RP Origins`).
+5. Review akhir Project Manager (ChatGPT) sebelum migrasi SQL di TASK 004B dimulai.
