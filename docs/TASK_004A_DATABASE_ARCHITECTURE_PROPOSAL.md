@@ -1,71 +1,72 @@
-# TASK 004A — UNSAID Supabase PostgreSQL Database Architecture Proposal
+# TASK 004A — UNSAID Supabase PostgreSQL Database Architecture Proposal (Revised)
 
-**Status Dokumen:** Proposal Arsitektur Database (Design Only — Belum Ada Implementasi/Migrasi)  
-**Peran:** Database Architecture Engineer  
-**Tanggal:** 2026-11-22  
+**Status Dokumen:** Revisi Proposal Arsitektur Database (Design Only — Menunggu Review Arsitektur ChatGPT & Persetujuan Eksplisit Founder)  
+**Peran:** Database Architecture & Implementation Engineer  
+**Tanggal Revisi:** 2026-11-22  
 **Bahasa Utama Produk:** Bahasa Indonesia (*Speak freely. Remain unknown.*)
 
 ---
 
-## 1. Repository Findings
+## Panduan Klasifikasi Keputusan dalam Dokumen Ini
 
-Hasil inspeksi langsung terhadap struktur repository dan konfigurasi saat ini (membedakan fakta terverifikasi dari asumsi):
+Untuk memisahkan keputusan final dari usulan teknis dan hal yang masih memerlukan tinjauan, seluruh dokumen memakai penanda berikut:
 
-### Fakta Terverifikasi di Repository
-1. **Stack Aplikasi Aktif (`package.json`, `astro.config.mjs`, `tsconfig.json`):**
-   - Framework utama adalah **Astro `^6.4.8`** dengan mode **`output: 'server'`** dan adapter **`@astrojs/node` (`^10.1.4`, `mode: 'standalone'`)** pada port `3000`.
-   - Integrasi UI menggunakan **`@astrojs/react` (`^5.0.7`)**, **React `19.x`**, **Tailwind CSS v4 (`@tailwindcss/vite ^4.3.5`)**, dan **TypeScript (`^5.9.3`, strict mode)**.
-   - Validasi menggunakan **Zod (`^4.3.6` / terpasang `4.6.7`)** dan unit testing menggunakan **Vitest (`~4.0.18`)**.
-2. **Dependensi & Klien Supabase Saat Ini (`package.json`, `src/lib/supabase/browser.ts`, `src/server/services/supabase.ts`):**
-   - Paket **`@supabase/supabase-js` (`^2.119.2`)** dan **`@supabase/ssr` (`^0.12.7`)** sudah terpasang di `package.json`.
-   - `src/lib/supabase/browser.ts` mengekspor `createBrowserSupabaseClient()` menggunakan `createBrowserClient` dari `@supabase/ssr`, dan hanya membaca `getPublicConfig()` (`PUBLIC_SUPABASE_URL`, `PUBLIC_SUPABASE_ANON_KEY`).
-   - `src/server/services/supabase.ts` mengekspor `createServerAnonClient()` dan `createServerAdminClient()` menggunakan `createClient` dengan opsi stateless (`persistSession: false`, `autoRefreshToken: false`, `detectSessionInUrl: false`).
-3. **Konfigurasi Environment & Batas Keamanan (`src/validation/env.ts`, `src/config/public.ts`, `src/config/server.ts`, `.env.example`):**
-   - `.env.example` hanya berisi placeholder: `PUBLIC_APP_URL`, `PUBLIC_SUPABASE_URL`, `PUBLIC_SUPABASE_ANON_KEY`, `APP_URL`, dan `SUPABASE_SERVICE_ROLE_KEY`. Tidak ada file `.env` atau kredensial Supabase aktif di workspace.
-   - `src/validation/env.ts` sudah memiliki validasi Zod (`publicEnvSchema`, `serverEnvSchema`) serta fungsi `assertNoSecretLeakage()` yang menolak `SERVICE_ROLE`, `PRIVATE_KEY`, `SECRET_KEY`, atau `DATABASE_URL` jika diberi prefix `PUBLIC_` atau `VITE_`.
-   - `src/config/server.ts` memiliki guard runtime (`typeof window !== 'undefined'`) agar konfigurasi server tidak dapat diakses dari kode browser.
-4. **Model & Aturan Domain yang Sudah Ada (`src/domain/models/identity.ts`, `src/domain/logic/identity-rules.ts`):**
-   - Mendefinisikan `PublicationIdentityMode = 'anonymous' | 'alias'` dengan default `'anonymous'`.
-   - Mendefinisikan `FORBIDDEN_PUBLIC_OWNERSHIP_FIELDS` (`owner_user_id`, `author_user_id`, `user_id`, `email`, `ip_address`, `public_author_id`) dan fungsi `assertPublicPayloadSanitized()`.
-5. **Status File Database & Migrasi:**
-   - **Belum ada** direktori `supabase/`, file `.sql`, migrasi skema, konfigurasi Supabase CLI (`supabase/config.toml`), maupun tabel database apa pun di repository.
-   - Terdapat `tests/env.test.ts` dan `tests/identity-rules.test.ts` sebagai baseline unit test Vitest, namun belum ada test integrasi RLS/PostgreSQL atau Playwright end-to-end.
-   - Catatan workspace: `bun.lock` dan `package-lock.json` sama-sama terlihat di root saat inspeksi direktori; standar runtime yang berjalan adalah `npm` (`package-lock.json`).
-
-### Asumsi & Infrastruktur yang Belum Terverifikasi
-- Belum ada proyek Supabase Cloud / self-hosted yang terhubung atau kredensial yang diverifikasi di container ini.
-- Versi pasti PostgreSQL pada instance Supabase target belum diverifikasi (diasumsikan PostgreSQL `15+` / `16+` yang merupakan standar Supabase untuk dukungan `security_invoker = true` pada view).
-- Konfigurasi Supabase Auth (Email OTP, WebAuthn/Passkeys RP ID & RP Origins, custom SMTP, rate-limit gateway) belum dikonfigurasi.
-- Paket sanitizer Markdown (`remark`/`rehype` + `sanitize-html` atau setara) dan `@playwright/test` belum terpasang di `package.json`.
+- **`[APPROVED BY FOUNDER]`** — Keputusan produk/privasi final yang sudah disetujui Founder dan wajib dipatuhi skema.
+- **`[TECHNICAL RECOMMENDATION]`** — Usulan desain teknis/database oleh tim engineering untuk memenuhi kebutuhan keamanan, konsistensi, dan skalabilitas.
+- **`[REQUIRES LEGAL REVIEW]`** — Parameter kebijakan hukum/retensi/preservasi yang wajib ditinjau konsultan hukum (UU PDP, UU ITE, KUHAP) sebelum diberlakukan di produksi.
+- **`[REQUIRES FOUNDER APPROVAL]`** — Pilihan desain/operasional tersisa yang masih memerlukan keputusan eksplisit Founder sebelum Task 004B/migrasi dimulai.
 
 ---
 
-## 2. Architecture Overview
+## 1. Repository & Environment Findings (Verified vs. Unverified)
 
-Arsitektur database UNSAID dirancang berdasarkan prinsip **Privacy & Anonymity by Structural Separation**, bukan sekadar menyaring kolom di lapisan UI.
+### Fakta Terverifikasi di Repository & Paket Terpasang
+1. **Stack Aplikasi (`package.json`, `astro.config.mjs`, `tsconfig.json`):**
+   - Astro `^6.4.8` (`output: 'server'`, `@astrojs/node ^10.1.4` `mode: 'standalone'`, port `3000`).
+   - React `^19.0.1` (`@astrojs/react ^5.0.7`), Tailwind CSS v4 (`@tailwindcss/vite ^4.3.5`), TypeScript `^5.9.3` (`strict`), Zod `^4.3.6` (terpasang `4.6.7`), Vitest `~4.0.18`.
+2. **Klien & Versi SDK Supabase (`package.json`, `package-lock.json`, `src/lib/supabase/browser.ts`, `src/server/services/supabase.ts`):**
+   - Terpasang `@supabase/supabase-js` versi **`2.119.2`** dan `@supabase/ssr` versi **`0.12.7`**.
+   - Verifikasi langsung definisi tipe `@supabase/auth-js@2.119.2` (`GoTrueClient.d.ts` & `lib/types.d.ts`):
+     - **Email OTP** tersedia melalui `signInWithOtp()` dan `verifyOtp()`.
+     - **Passkeys (WebAuthn)** tersedia secara native di SDK klien (`registerPasskey()`, `signInWithPasskey()`, `auth.passkey.{startRegistration, verifyRegistration, startAuthentication, verifyAuthentication, list, update, delete}`, serta `auth.admin.passkey.{listPasskeys, deletePasskey}`). Flag `experimental.passkey` sudah berstatus `@deprecated` di SDK karena Passkey API klien aktif secara default; **namun** fitur server-side Passkeys di Supabase Auth masih berstatus Beta dan tetap memerlukan aktivasi eksplisit di server/dashboard Supabase (`Authentication -> Passkeys` / GoTrue `GOTRUE_PASSKEY_ENABLED=true`, `GOTRUE_WEBAUTHN_RP_ID`, `GOTRUE_WEBAUTHN_RP_ORIGINS`).
+   - `src/lib/supabase/browser.ts` hanya membaca `PUBLIC_SUPABASE_URL` & `PUBLIC_SUPABASE_ANON_KEY`.
+   - `src/server/services/supabase.ts` menyediakan `createServerAnonClient()` dan `createServerAdminClient()` stateless.
+3. **Konfigurasi Environment & Guard (`src/validation/env.ts`, `src/config/public.ts`, `src/config/server.ts`, `.env.example`):**
+   - `.env.example` hanya berisi placeholder (`PUBLIC_APP_URL`, `PUBLIC_SUPABASE_URL`, `PUBLIC_SUPABASE_ANON_KEY`, `APP_URL`, `SUPABASE_SERVICE_ROLE_KEY`).
+   - `assertNoSecretLeakage()` di `src/validation/env.ts` menolak prefix `PUBLIC_` / `VITE_` pada kredensial privat, dan `src/config/server.ts` menolak eksekusi di browser.
+4. **Domain Model & Unit Tests (`src/domain/models/identity.ts`, `src/domain/logic/identity-rules.ts`, `tests/`):**
+   - Mendefinisikan `PublicationIdentityMode = 'anonymous' | 'alias'` (default `'anonymous'`), `FORBIDDEN_PUBLIC_OWNERSHIP_FIELDS`, dan `assertPublicPayloadSanitized()`.
+5. **Status Database:**
+   - Belum ada folder `supabase/`, file migrasi `.sql`, atau tabel database apa pun di repository.
 
-### Prinsip Inti Desain Data
-1. **Pemisahan Skema `public` vs `private`:**
-   - **Skema `public`:** Hanya menyimpan entitas konten yang memang boleh dibaca publik (`posts`, `comments`, `aliases`, `categories`, `post_reaction_counts`, dan public views) serta entitas milik pribadi pengguna yang terisolasi ketat oleh RLS (`post_drafts`, `bookmarks`), atau seluruh operasi privat dialihkan melalui Astro SSR BFF.
-   - **Skema `private` (tidak diekspos ke PostgREST):** Menyimpan seluruh tabel pemetaan kepemilikan internal (`post_ownership`, `alias_ownership`, `comment_ownership`), karantina alias (`alias_quarantines`), pelaporan (`reports`), moderasi (`moderation_actions`, `moderation_appeals`, `moderation_audit_logs`), dan peran staf (`staff_roles`).
-   - **Alasan Kritis:** PostgreSQL RLS hanya menyaring **baris**, bukan **kolom**. Jika `author_user_id` diletakkan di tabel `posts`, satu kesalahan konfigurasi RLS atau query `select=*` via PostgREST langsung membocorkan identitas pemilik. Dengan memindahkan seluruh kolom `owner_user_id` ke skema `private`, **tidak ada query publik maupun view publik yang secara fisik dapat membaca kolom identitas pemilik.**
-
-2. **Defense-in-Depth antara Astro SSR BFF dan Supabase PostgREST:**
-   - **Public Read Path:** Dapat membaca `public.public_posts_feed`, `public.public_post_detail`, `public.public_comments_view`, dan `public.categories` melalui Astro SSR (`createServerAnonClient()`) maupun query tervalidasi—semuanya tidak mengandung satu pun kolom identitas akun.
-   - **Authenticated Write & Private Path:** Seluruh mutasi sensitif (publikasi tulisan, klaim/rilis alias, komentar, pelaporan, banding moderasi, penghapusan akun) wajib melalui **Astro SSR API Routes / Actions** yang memverifikasi JWT pengguna via `supabase.auth.getUser()` di server (tidak pernah mempercayai `user_id` dari body/query klien), lalu memanggil fungsi transaksional PostgreSQL (`SECURITY DEFINER` dengan `SET search_path = ''`) atau `service_role` di server.
-   - **Direct PostgREST Guard:** Bahkan jika pihak luar memanggil PostgREST langsung dengan `PUBLIC_SUPABASE_ANON_KEY` dan JWT pengguna, skema `private` tidak masuk daftar `Exposed schemas` PostgREST, dan tabel privat di `public` (`post_drafts`, `bookmarks`) terkunci ketat oleh RLS `auth.uid() = owner_user_id`.
-
-3. **Zero-Correlation untuk Konten Anonim:**
-   - Dua tulisan berstatus `anonymous` dari akun yang sama **tidak memiliki** `alias_id`, `public_author_id`, hash deterministik dari `user_id`, ataupun token sesi publik.
-   - Seluruh komentar di `public.comments` tampil sebagai `Anonim` tanpa `alias_id`, tanpa `commenter_user_id`, dan tanpa penanda `OP` (*Original Poster*).
-
-4. **Integritas Konten Text-Only MVP:**
-   - Tabel `post_drafts`, `posts`, dan `comments` menyimpan konten teks terstruktur (Markdown yang sudah divalidasi/disanitasi di server + `content_text` polos untuk pencarian), tanpa kolom media/gambar/embed/raw HTML.
-   - Tidak ada batasan minimum universal 20 karakter (hanya syarat teks tidak kosong setelah `trim`, sehingga puisi pendek/aforisme tetap valid).
+### Infrastruktur & Asumsi yang Belum Terverifikasi
+- **Belum ada proyek Supabase live** (cloud atau self-hosted) atau kredensial aktif di environment ini.
+- **Konfigurasi PostgreSQL FTS `indonesian`:** Dokumentasi PostgreSQL & Supabase mencantumkan konfigurasi bahasa `indonesian` (Snowball stemmer + stopwords) sebagai bagian dari distribusi standar PostgreSQL, **namun keberadaan aktual `cfgname = 'indonesian'` di `pg_ts_config` pada instance Supabase target belum dapat diverifikasi** sebelum proyek Supabase tersedia. Oleh karena itu, arsitektur ini **tidak mengasumsikan** `indonesian` pasti tersedia tanpa pre-flight check dan strategi fallback.
+- **Status Aktivasi Passkeys di Server Supabase Target & RP Domain:** Kesiapan WebAuthn RP ID / RP Origins pada domain produksi dan kebijakan iframe preview belum terverifikasi terhadap proyek live.
 
 ---
 
-## 3. Entity Relationship Diagram (Mermaid)
+## 2. Revised Architecture Overview
+
+Arsitektur PostgreSQL UNSAID menerapkan **Structural Anonymity & Least-Privilege Segregation**:
+
+1. **Pemisahan Skema `public` vs `private` vs `legal_vault` (`[TECHNICAL RECOMMENDATION]`):**
+   - **Skema `public`:** Berisi hanya tabel publik tanpa identitas pengguna (`categories`, `aliases`, `posts`, `comments`, `post_reaction_stats`), tabel kerja pribadi pengguna dengan RLS ketat (`post_drafts`, `bookmarks`, `post_reactions`), dan public views beropsi `WITH (security_invoker = true, security_barrier = true)`.
+   - **Skema `private` (tidak diekspos oleh PostgREST):** Berisi pemetaan kepemilikan internal (`user_accounts`, `alias_ownership`, `post_ownership`, `comment_ownership`), karantina alias (`alias_quarantines`), antrean penghapusan akun (`deletion_jobs`), laporan & moderasi (`reports`, `moderation_actions`, `moderation_appeals`, `moderation_audit_logs`), serta hierarki akses staf 4-tier (`staff_roles`, `sensitive_access_requests`).
+   - **Skema `legal_vault` (terisolasi dari `moderator` & `operational_admin`, tidak diekspos ke PostgREST):** Berisi `legal_preservation_holds`, `legal_preservation_snapshots`, dan `legal_access_logs` yang hanya dapat diakses oleh `privacy_legal_officer` dengan persetujuan dua orang (*two-person approval*) bersama `super_admin_security` atau pejabat berwenang kedua.
+2. **Alasan Struktural (`[APPROVED BY FOUNDER]` + `[TECHNICAL RECOMMENDATION]`):**
+   - RLS PostgreSQL menyaring **baris**, bukan **kolom**. Karena `public.posts`, `public.comments`, dan `public.aliases` **tidak memiliki kolom `owner_user_id` atau `commenter_user_id` sama sekali**, API publik maupun PostgREST `select=*` secara fisik mustahil membocorkan identitas akun.
+3. **Batas Astro SSR BFF & `service_role`:**
+   - Klien browser tidak pernah memegang `SUPABASE_SERVICE_ROLE_KEY`.
+   - Seluruh operasi mutasi sensitif (klaim/rilis alias, publikasi, komentar, pelaporan, banding, moderasi, penghapusan akun, dan preservasi hukum) wajib melewati **Astro SSR Endpoints**, yang terlebih dahulu memverifikasi JWT pengguna secara kriptografis melalui `supabase.auth.getUser()` sebelum memanggil fungsi PostgreSQL `SECURITY DEFINER` (`SET search_path = ''`) atau service-role client yang diaudit oleh `staff_roles`.
+4. **Anti-Korelasi Anonim, Multi-Alias, dan Waktu (`[APPROVED BY FOUNDER]`):**
+   - Tulisan `anonymous` wajib memiliki `alias_id IS NULL` dan `public_author_label = 'Anonim'`.
+   - Komentar selalu publik sebagai `Anonim`, tanpa `alias_id` dan tanpa badge `OP`.
+   - Pelepasan alias dan penghapusan akun **mempertahankan `published_at` dan `updated_at` asli** (tidak memicu bump `updated_at = now()`) sehingga tidak terjadi korelasi waktu antara penghapusan akun dengan perubahan tulisan mantan alias.
+
+---
+
+## 3. Revised Entity Relationship Diagram (Mermaid)
 
 ```mermaid
 erDiagram
@@ -76,24 +77,38 @@ erDiagram
 
     USER_ACCOUNTS {
         uuid user_id PK, FK
-        text account_status "active | suspended | pending_deletion"
-        boolean deletion_confirmed
+        text account_status "active | pending_deletion | deletion_failed | suspended"
+        timestamptz deletion_requested_at
         timestamptz created_at
         timestamptz updated_at
+    }
+
+    DELETION_JOBS {
+        uuid id PK
+        uuid user_id FK
+        text idempotency_key UK
+        text state "requested | auth_session_revoked | db_unlinked | auth_deleted | completed | failed_retryable | failed_manual_intervention"
+        int attempt_count
+        timestamptz next_retry_at
+        text last_error_code
+        text last_error_detail
+        timestamptz created_at
+        timestamptz updated_at
+        timestamptz completed_at
     }
 
     CATEGORIES {
         uuid id PK
         text slug UK
-        text name
-        text description
+        text name UK
         int sort_order
+        boolean is_active
     }
 
     ALIASES {
         uuid id PK
         text display_name
-        text normalized_name UK "Case/whitespace-folded unique"
+        text normalized_name UK
         timestamptz created_at
     }
 
@@ -114,7 +129,7 @@ erDiagram
         uuid id PK
         uuid owner_user_id FK
         uuid category_id FK
-        uuid selected_alias_id FK "Nullable; default NULL"
+        uuid selected_alias_id FK "Nullable"
         text author_mode "anonymous | alias"
         text title
         text body_markdown
@@ -125,12 +140,13 @@ erDiagram
     POSTS {
         uuid id PK
         uuid category_id FK
-        uuid alias_id FK "Nullable; NULL for anonymous or deleted account"
+        uuid alias_id FK "Nullable"
         text author_mode "anonymous | alias"
         text public_author_label "Anonim or alias display_name"
         text title
         text body_markdown
         text body_plain_text
+        tsvector search_vector
         text moderation_status "visible | hidden | removed"
         timestamptz published_at
         timestamptz updated_at
@@ -172,9 +188,15 @@ erDiagram
         timestamptz created_at
     }
 
+    POST_REACTION_STATS {
+        uuid post_id PK, FK
+        int historical_appreciation_count
+        timestamptz last_active_reaction_at
+    }
+
     REPORTS {
         uuid id PK
-        uuid reporter_user_id FK "Nullable on account deletion"
+        uuid reporter_user_id FK "Nullable on deletion"
         text target_type "post | comment"
         uuid target_post_id FK "Nullable"
         uuid target_comment_id FK "Nullable"
@@ -186,16 +208,32 @@ erDiagram
 
     STAFF_ROLES {
         uuid user_id PK, FK
-        text role "moderator | admin"
+        text role "moderator | operational_admin | privacy_legal_officer | super_admin_security"
+        uuid granted_by FK
         timestamptz granted_at
+        timestamptz revoked_at
+    }
+
+    SENSITIVE_ACCESS_REQUESTS {
+        uuid id PK
+        uuid requested_by FK
+        uuid approved_by FK "Nullable; must differ from requested_by"
+        text purpose_code
+        text legal_or_incident_ref
+        text target_scope_type
+        uuid target_scope_id
+        text status "pending | approved | rejected | expired | revoked"
+        timestamptz expires_at
+        timestamptz created_at
     }
 
     MODERATION_ACTIONS {
         uuid id PK
-        uuid moderator_user_id FK "Nullable if staff removed"
+        uuid moderator_user_id FK "Nullable"
         text target_type "post | comment"
-        uuid target_post_id FK "Nullable"
-        uuid target_comment_id FK "Nullable"
+        uuid target_post_id FK "Nullable ON DELETE SET NULL"
+        uuid target_comment_id FK "Nullable ON DELETE SET NULL"
+        uuid target_snapshot_id "Immutable target UUID copy"
         text action_type "hide | restore | remove | dismiss_report"
         text policy_basis
         text internal_note
@@ -216,7 +254,7 @@ erDiagram
 
     MODERATION_AUDIT_LOGS {
         bigint seq_id PK
-        uuid moderation_action_id FK
+        uuid moderation_action_id FK "Nullable ON DELETE SET NULL"
         uuid actor_user_id
         text actor_role
         text event_type
@@ -226,455 +264,559 @@ erDiagram
         timestamptz created_at
     }
 
-    AUTH_USERS ||--o| USER_ACCOUNTS : "extends privately"
+    LEGAL_PRESERVATION_HOLDS {
+        uuid id PK
+        text authority_reference
+        text legal_basis
+        text target_scope_type "user | post | comment | report"
+        uuid target_id
+        uuid created_by_officer_id FK
+        uuid approved_by_officer_id FK
+        text status "active | expired | released"
+        timestamptz expires_at
+        timestamptz released_at
+        timestamptz created_at
+    }
+
+    LEGAL_PRESERVATION_SNAPSHOTS {
+        uuid id PK
+        uuid hold_id FK
+        text record_type
+        uuid source_record_id
+        jsonb encrypted_or_restricted_payload
+        timestamptz purge_after
+        timestamptz created_at
+    }
+
+    AUTH_USERS ||--o| USER_ACCOUNTS : "account state"
+    AUTH_USERS ||--o{ DELETION_JOBS : "tracks deletion"
     AUTH_USERS ||--o{ ALIAS_OWNERSHIP : "owns privately"
     ALIASES ||--|| ALIAS_OWNERSHIP : "mapped via"
-    AUTH_USERS ||--o{ POST_DRAFTS : "writes"
+    AUTH_USERS ||--o{ POST_DRAFTS : "authors"
     CATEGORIES ||--o{ POST_DRAFTS : "categorizes"
-    ALIASES ||--o{ POST_DRAFTS : "optional draft persona"
+    ALIASES ||--o{ POST_DRAFTS : "optional draft alias"
     CATEGORIES ||--o{ POSTS : "categorizes"
-    ALIASES ||--o{ POSTS : "attributed publicly when alias"
-    POSTS ||--o| POST_OWNERSHIP : "owned privately via"
+    ALIASES ||--o{ POSTS : "attributed while active"
+    POSTS ||--o| POST_OWNERSHIP : "owned via"
     AUTH_USERS ||--o{ POST_OWNERSHIP : "owns while active"
     POSTS ||--o{ COMMENTS : "has"
-    COMMENTS ||--o{ COMMENTS : "replies to"
-    COMMENTS ||--o| COMMENT_OWNERSHIP : "owned privately via"
-    AUTH_USERS ||--o{ COMMENT_OWNERSHIP : "authored privately"
+    COMMENTS ||--o{ COMMENTS : "replies"
+    COMMENTS ||--o| COMMENT_OWNERSHIP : "owned via"
+    AUTH_USERS ||--o{ COMMENT_OWNERSHIP : "authored while active"
     AUTH_USERS ||--o{ BOOKMARKS : "saves"
-    POSTS ||--o{ BOOKMARKS : "bookmarked in"
-    AUTH_USERS ||--o{ POST_REACTIONS : "reacts"
+    POSTS ||--o{ BOOKMARKS : "bookmarked"
+    AUTH_USERS ||--o{ POST_REACTIONS : "active reaction"
     POSTS ||--o{ POST_REACTIONS : "receives"
-    AUTH_USERS ||--o{ REPORTS : "submits"
-    POSTS ||--o{ REPORTS : "reported target"
-    COMMENTS ||--o{ REPORTS : "reported target"
-    AUTH_USERS ||--o| STAFF_ROLES : "assigned"
+    POSTS ||--|| POST_REACTION_STATS : "historical count"
+    AUTH_USERS ||--o{ REPORTS : "reports while active"
+    POSTS ||--o{ REPORTS : "reported post"
+    COMMENTS ||--o{ REPORTS : "reported comment"
+    AUTH_USERS ||--o| STAFF_ROLES : "4-tier role"
+    STAFF_ROLES ||--o{ SENSITIVE_ACCESS_REQUESTS : "requests/approves"
     STAFF_ROLES ||--o{ MODERATION_ACTIONS : "executes"
+    POSTS ||--o{ MODERATION_ACTIONS : "target post"
+    COMMENTS ||--o{ MODERATION_ACTIONS : "target comment"
     MODERATION_ACTIONS ||--o{ MODERATION_APPEALS : "appealed via"
-    MODERATION_ACTIONS ||--o{ MODERATION_AUDIT_LOGS : "recorded in"
+    MODERATION_ACTIONS ||--o{ MODERATION_AUDIT_LOGS : "audited in"
+    LEGAL_PRESERVATION_HOLDS ||--o{ LEGAL_PRESERVATION_SNAPSHOTS : "preserves scoped data"
 ```
 
 ---
 
-## 4. Table-by-Table Schema Proposal
+## 4. Updated Table-by-Table Schema Proposal
 
-> **Catatan Konvensi:**
-> - Skema **`public`**: berisi tabel konten/referensi publik dan tabel milik pengguna yang langsung dilindungi RLS (`post_drafts`, `bookmarks`, `post_reactions`) serta view publik (`security_invoker = true`).
-> - Skema **`private`**: **tidak diekspos ke PostgREST**; berisi pemetaan kepemilikan, karantina alias, pelaporan, peran moderator, tindakan moderasi, banding, dan audit log.
+### A. Skema `public`
 
-### A. Skema `public` (Publik & Ruang Kerja Terisolasi RLS)
+#### 1. `public.categories` `[APPROVED BY FOUNDER]`
+- `id UUID PRIMARY KEY DEFAULT gen_random_uuid()`
+- `slug TEXT NOT NULL UNIQUE CHECK (slug ~ '^[a-z0-9-]+$')`
+- `name TEXT NOT NULL UNIQUE`
+- `description TEXT NOT NULL DEFAULT ''`
+- `sort_order INTEGER NOT NULL DEFAULT 0`
+- `is_active BOOLEAN NOT NULL DEFAULT TRUE`
+- `created_at TIMESTAMPTZ NOT NULL DEFAULT now()`
 
-#### 1. `public.categories`
-- **Tanggung Jawab:** Daftar topik/kategori tulisan untuk feed, jelajah, filter, dan rekomendasi tulisan terkait (berbasis topik, bukan penulis).
-- **Kolom Utama:**
-  - `id UUID PRIMARY KEY DEFAULT gen_random_uuid()`
-  - `slug TEXT NOT NULL UNIQUE` (`CHECK (slug ~ '^[a-z0-9-]+$')`)
-  - `name TEXT NOT NULL UNIQUE`
-  - `description TEXT NOT NULL DEFAULT ''`
-  - `sort_order INTEGER NOT NULL DEFAULT 0`
-  - `is_active BOOLEAN NOT NULL DEFAULT TRUE`
-  - `created_at TIMESTAMPTZ NOT NULL DEFAULT now()`
+#### 2. `public.aliases` `[APPROVED BY FOUNDER]`
+- `id UUID PRIMARY KEY DEFAULT gen_random_uuid()`
+- `display_name TEXT NOT NULL CHECK (char_length(trim(display_name)) BETWEEN 2 AND 40)`
+- `normalized_name TEXT NOT NULL UNIQUE` (hasil normalisasi kanonik `lower(regexp_replace(trim(display_name), '\s+', ' ', 'g'))`)
+- `created_at TIMESTAMPTZ NOT NULL DEFAULT now()`
+- **Jaminan Privasi:** Tidak ada `owner_user_id` atau kolom apa pun yang mengaitkan beberapa alias ke satu akun.
 
-#### 2. `public.aliases`
-- **Tanggung Jawab:** Menyimpan persona publik alias secara global unik **tanpa** kolom `owner_user_id`.
-- **Kolom Utama:**
-  - `id UUID PRIMARY KEY DEFAULT gen_random_uuid()`
-  - `display_name TEXT NOT NULL` (`CHECK (char_length(trim(display_name)) BETWEEN 2 AND 40)`)
-  - `normalized_name TEXT NOT NULL UNIQUE` (hasil normalisasi `lower(regexp_replace(trim(display_name), '\s+', ' ', 'g'))`)
-  - `created_at TIMESTAMPTZ NOT NULL DEFAULT now()`
-- **Catatan Keamanan:** Publik hanya dapat melihat alias yang memang eksis secara publik; tidak ada kolom yang dapat menghubungkan alias A dan alias B ke akun yang sama.
+#### 3. `public.post_drafts` `[APPROVED BY FOUNDER]`
+- `id UUID PRIMARY KEY DEFAULT gen_random_uuid()`
+- `owner_user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE`
+- `category_id UUID REFERENCES public.categories(id) ON DELETE SET NULL`
+- `selected_alias_id UUID REFERENCES public.aliases(id) ON DELETE SET NULL`
+- `author_mode TEXT NOT NULL DEFAULT 'anonymous' CHECK (author_mode IN ('anonymous', 'alias'))`
+- `title TEXT NOT NULL DEFAULT '' CHECK (char_length(title) <= 180)`
+- `body_markdown TEXT NOT NULL DEFAULT '' CHECK (char_length(body_markdown) <= 50000)`
+- `created_at TIMESTAMPTZ NOT NULL DEFAULT now()`
+- `updated_at TIMESTAMPTZ NOT NULL DEFAULT now()`
+- **Constraint:** `CHECK ((author_mode = 'anonymous' AND selected_alias_id IS NULL) OR (author_mode = 'alias'))`
 
-#### 3. `public.post_drafts`
-- **Tanggung Jawab:** Menyimpan draf pribadi sebelum diterbitkan. Terpisah total dari tabel `posts` agar draf yang belum siap/rahasia tidak mungkin bocor oleh kesalahan query feed publik.
-- **Kolom Utama:**
-  - `id UUID PRIMARY KEY DEFAULT gen_random_uuid()`
-  - `owner_user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE`
-  - `category_id UUID REFERENCES public.categories(id) ON DELETE SET NULL`
-  - `selected_alias_id UUID REFERENCES public.aliases(id) ON DELETE SET NULL` (divalidasi di server bahwa alias ini milik `owner_user_id`)
-  - `author_mode TEXT NOT NULL DEFAULT 'anonymous'` (`CHECK (author_mode IN ('anonymous', 'alias'))`)
-  - `title TEXT NOT NULL DEFAULT ''` (`CHECK (char_length(title) <= 180)`)
-  - `body_markdown TEXT NOT NULL DEFAULT ''` (`CHECK (char_length(body_markdown) <= 50000)`)
-  - `created_at TIMESTAMPTZ NOT NULL DEFAULT now()`
-  - `updated_at TIMESTAMPTZ NOT NULL DEFAULT now()`
-- **Constraint Tambahan:** `CHECK ((author_mode = 'anonymous' AND selected_alias_id IS NULL) OR (author_mode = 'alias'))`
+#### 4. `public.posts` `[APPROVED BY FOUNDER]` + `[TECHNICAL RECOMMENDATION]`
+- `id UUID PRIMARY KEY DEFAULT gen_random_uuid()`
+- `category_id UUID NOT NULL REFERENCES public.categories(id) ON DELETE RESTRICT`
+- `alias_id UUID REFERENCES public.aliases(id) ON DELETE SET NULL`
+- `author_mode TEXT NOT NULL DEFAULT 'anonymous' CHECK (author_mode IN ('anonymous', 'alias'))`
+- `public_author_label TEXT NOT NULL DEFAULT 'Anonim'`
+- `title TEXT NOT NULL CHECK (char_length(trim(title)) BETWEEN 1 AND 180)`
+- `body_markdown TEXT NOT NULL CHECK (char_length(trim(body_markdown)) BETWEEN 1 AND 50000)`
+- `body_plain_text TEXT NOT NULL CHECK (char_length(trim(body_plain_text)) >= 1)` *(mendukung puisi pendek tanpa batas minimum 20 karakter)*
+- `search_vector TSVECTOR` *(diisi oleh trigger `BEFORE INSERT OR UPDATE` menggunakan konfigurasi FTS yang terverifikasi di lingkungan target — lihat Catatan FTS Indonesia di bawah)*
+- `moderation_status TEXT NOT NULL DEFAULT 'visible' CHECK (moderation_status IN ('visible', 'hidden', 'removed'))`
+- `published_at TIMESTAMPTZ NOT NULL DEFAULT now()`
+- `updated_at TIMESTAMPTZ NOT NULL DEFAULT now()`
+- **Constraint Identitas Publik:**
+  `CHECK ((author_mode = 'anonymous' AND alias_id IS NULL AND public_author_label = 'Anonim') OR (author_mode = 'alias' AND alias_id IS NOT NULL AND public_author_label <> 'Anonim'))`
+- **Proteksi Timestamp & FTS (`[TECHNICAL RECOMMENDATION]`):**
+  - Trigger `trg_posts_before_update` **hanya** mengubah `updated_at = now()` jika kolom konten (`title`, `body_markdown`, `category_id`) berubah **DAN** `current_setting('unsaid.suppress_updated_at', true) IS DISTINCT FROM 'on'`. Saat alias dilepas atau akun dihapus, `published_at` dan `updated_at` tetap utuh.
+  - **Validasi Full-Text Search Bahasa Indonesia (Koreksi Teknis #9):** Sebelum menggunakan `'indonesian'` di migrasi, skrip pre-flight wajib memeriksa `SELECT cfgname FROM pg_ts_config WHERE cfgname = 'indonesian'`. Trigger `trg_posts_search_vector` akan membaca konfigurasi tervalidasi (`indonesian` bila tersedia di `pg_ts_config`, atau fallback ke `'simple'` + indeks `pg_trgm` pada `title` dan `body_plain_text`), bukan memaksa `GENERATED ALWAYS AS (to_tsvector('indonesian', ...))` secara buta.
 
-#### 4. `public.posts`
-- **Tanggung Jawab:** Menyimpan tulisan terbit untuk konsumsi publik. **Dilarang keras** memiliki `owner_user_id`, `author_user_id`, `email`, atau `ip_address`.
-- **Kolom Utama:**
-  - `id UUID PRIMARY KEY DEFAULT gen_random_uuid()`
-  - `category_id UUID NOT NULL REFERENCES public.categories(id) ON DELETE RESTRICT`
-  - `alias_id UUID REFERENCES public.aliases(id) ON DELETE SET NULL` (wajib `NULL` saat `author_mode = 'anonymous'`)
-  - `author_mode TEXT NOT NULL DEFAULT 'anonymous'` (`CHECK (author_mode IN ('anonymous', 'alias'))`)
-  - `public_author_label TEXT NOT NULL DEFAULT 'Anonim'` (berisi `'Anonim'` atau salinan `display_name` alias aktif; otomatis menjadi `'Anonim'` jika alias dilepas atau akun dihapus)
-  - `title TEXT NOT NULL` (`CHECK (char_length(trim(title)) BETWEEN 1 AND 180)`)
-  - `body_markdown TEXT NOT NULL` (`CHECK (char_length(trim(body_markdown)) BETWEEN 1 AND 50000)`)
-  - `body_plain_text TEXT NOT NULL` (teks hasil sanitasi/ekstraksi server untuk indeks `tsvector` pencarian tanpa markup)
-  - `search_vector TSVECTOR GENERATED ALWAYS AS (to_tsvector('indonesian', coalesce(title, '') || ' ' || coalesce(body_plain_text, ''))) STORED`
-  - `moderation_status TEXT NOT NULL DEFAULT 'visible'` (`CHECK (moderation_status IN ('visible', 'hidden', 'removed'))`)
-  - `published_at TIMESTAMPTZ NOT NULL DEFAULT now()`
-  - `updated_at TIMESTAMPTZ NOT NULL DEFAULT now()`
-- **Constraint Integritas Identitas:**
-  - `CHECK ((author_mode = 'anonymous' AND alias_id IS NULL AND public_author_label = 'Anonim') OR (author_mode = 'alias' AND alias_id IS NOT NULL AND public_author_label <> 'Anonim'))`
-  - (Menjamin secara struktural bahwa tulisan Anonim tidak pernah membawa `alias_id`, dan saat akun dihapus/alias dilepas, mode kembali ke `'anonymous'` secara atomik).
+#### 5. `public.comments` `[APPROVED BY FOUNDER]`
+- `id UUID PRIMARY KEY DEFAULT gen_random_uuid()`
+- `post_id UUID NOT NULL REFERENCES public.posts(id) ON DELETE CASCADE`
+- `parent_comment_id UUID REFERENCES public.comments(id) ON DELETE CASCADE`
+- `body_markdown TEXT NOT NULL CHECK (char_length(trim(body_markdown)) BETWEEN 1 AND 5000)`
+- `moderation_status TEXT NOT NULL DEFAULT 'visible' CHECK (moderation_status IN ('visible', 'hidden', 'removed'))`
+- `is_deleted_by_author BOOLEAN NOT NULL DEFAULT FALSE`
+- `created_at TIMESTAMPTZ NOT NULL DEFAULT now()`
+- **Larangan Kolom:** Tidak ada `commenter_user_id`, `alias_id`, maupun `is_op`.
 
-#### 5. `public.comments`
-- **Tanggung Jawab:** Menyimpan komentar publik. Selalu beridentitas publik `Anonim`, tanpa alias dan tanpa status OP.
-- **Kolom Utama:**
-  - `id UUID PRIMARY KEY DEFAULT gen_random_uuid()`
-  - `post_id UUID NOT NULL REFERENCES public.posts(id) ON DELETE CASCADE`
-  - `parent_comment_id UUID REFERENCES public.comments(id) ON DELETE CASCADE` (opsional balasan komentar; validasi server memastikan `parent_comment_id` berada pada `post_id` yang sama)
-  - `body_markdown TEXT NOT NULL` (`CHECK (char_length(trim(body_markdown)) BETWEEN 1 AND 5000)`)
-  - `moderation_status TEXT NOT NULL DEFAULT 'visible'` (`CHECK (moderation_status IN ('visible', 'hidden', 'removed'))`)
-  - `is_deleted_by_author BOOLEAN NOT NULL DEFAULT FALSE`
-  - `created_at TIMESTAMPTZ NOT NULL DEFAULT now()`
-- **Catatan Keamanan:** Tidak ada kolom `commenter_user_id`, `alias_id`, maupun `is_op`.
+#### 6. `public.bookmarks` `[APPROVED BY FOUNDER]`
+- `user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE`
+- `post_id UUID NOT NULL REFERENCES public.posts(id) ON DELETE CASCADE`
+- `created_at TIMESTAMPTZ NOT NULL DEFAULT now()`
+- `PRIMARY KEY (user_id, post_id)`
 
-#### 6. `public.bookmarks`
-- **Tanggung Jawab:** Daftar simpanan tulisan pribadi milik pengguna terautentikasi.
-- **Kolom Utama:**
-  - `user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE`
-  - `post_id UUID NOT NULL REFERENCES public.posts(id) ON DELETE CASCADE`
-  - `created_at TIMESTAMPTZ NOT NULL DEFAULT now()`
-  - `PRIMARY KEY (user_id, post_id)`
+#### 7. `public.post_reactions` `[APPROVED BY FOUNDER]` + `[TECHNICAL RECOMMENDATION]`
+- `id UUID PRIMARY KEY DEFAULT gen_random_uuid()`
+- `post_id UUID NOT NULL REFERENCES public.posts(id) ON DELETE CASCADE`
+- `user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE`
+- `reaction_type TEXT NOT NULL DEFAULT 'appreciate' CHECK (reaction_type IN ('appreciate'))`
+- `created_at TIMESTAMPTZ NOT NULL DEFAULT now()`
+- `UNIQUE (post_id, user_id, reaction_type)`
+- **Aturan Trigger:** **Dilarang** memasang trigger `AFTER DELETE` otomatis yang mengurangi `post_reaction_stats`. Seluruh perubahan hitungan dikendalikan oleh RPC eksplisit (lihat Bagian 6).
 
-#### 7. `public.post_reactions`
-- **Tanggung Jawab:** Pencatatan reaksi per pengguna per tulisan untuk mencegah manipulasi angka ganda, sambil menjaga kerahasiaan siapa bereaksi terhadap apa.
-- **Kolom Utama:**
-  - `id UUID PRIMARY KEY DEFAULT gen_random_uuid()`
-  - `post_id UUID NOT NULL REFERENCES public.posts(id) ON DELETE CASCADE`
-  - `user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE`
-  - `reaction_type TEXT NOT NULL DEFAULT 'appreciate'` (`CHECK (reaction_type IN ('appreciate'))`)
-  - `created_at TIMESTAMPTZ NOT NULL DEFAULT now()`
-  - `UNIQUE (post_id, user_id, reaction_type)`
-- **Catatan Paparan Publik:** Publik **tidak pernah** boleh `SELECT` langsung dari `public.post_reactions` (karena mengandung `user_id`). Publik hanya boleh membaca agregat jumlah melalui tabel cache `public.post_reaction_counts (post_id PK, appreciate_count INT)` yang diperbarui oleh trigger/RPC.
-
-#### 8. `public.post_reaction_counts`
-- **Tanggung Jawab:** Menyimpan agregat hitungan reaksi publik tanpa `user_id` apa pun.
-- **Kolom Utama:**
-  - `post_id UUID PRIMARY KEY REFERENCES public.posts(id) ON DELETE CASCADE`
-  - `appreciate_count INTEGER NOT NULL DEFAULT 0` (`CHECK (appreciate_count >= 0)`)
+#### 8. `public.post_reaction_stats` `[APPROVED BY FOUNDER]` + `[TECHNICAL RECOMMENDATION]`
+- `post_id UUID PRIMARY KEY REFERENCES public.posts(id) ON DELETE CASCADE`
+- `historical_appreciation_count INTEGER NOT NULL DEFAULT 0 CHECK (historical_appreciation_count >= 0)`
+- `last_active_reaction_at TIMESTAMPTZ`
 
 ---
 
-### B. Skema `private` (Tidak Diekspos ke PostgREST — Khusus SSR/RPC/Admin Terotorisasi)
+### B. Skema `private` (Tidak Diekspos di PostgREST)
 
-#### 9. `private.user_accounts`
-- **Tanggung Jawab:** Status akun internal dan penanda konfirmasi penghapusan akun (melengkapi `auth.users`).
-- **Kolom Utama:**
-  - `user_id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE`
-  - `account_status TEXT NOT NULL DEFAULT 'active'` (`CHECK (account_status IN ('active', 'suspended', 'pending_deletion'))`)
-  - `deletion_requested_at TIMESTAMPTZ`
-  - `created_at TIMESTAMPTZ NOT NULL DEFAULT now()`
-  - `updated_at TIMESTAMPTZ NOT NULL DEFAULT now()`
+#### 9. `private.user_accounts` `[TECHNICAL RECOMMENDATION]`
+- `user_id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE`
+- `account_status TEXT NOT NULL DEFAULT 'active' CHECK (account_status IN ('active', 'pending_deletion', 'deletion_failed', 'suspended'))`
+- `deletion_requested_at TIMESTAMPTZ`
+- `created_at TIMESTAMPTZ NOT NULL DEFAULT now()`
+- `updated_at TIMESTAMPTZ NOT NULL DEFAULT now()`
 
-#### 10. `private.alias_ownership`
-- **Tanggung Jawab:** Memetakan kepemilikan privat `alias_id -> owner_user_id`. Tidak pernah diekspos ke API publik.
-- **Kolom Utama:**
-  - `alias_id UUID PRIMARY KEY REFERENCES public.aliases(id) ON DELETE CASCADE`
-  - `owner_user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE`
-  - `claimed_at TIMESTAMPTZ NOT NULL DEFAULT now()`
+#### 10. `private.deletion_jobs` `[APPROVED BY FOUNDER]` + `[TECHNICAL RECOMMENDATION]`
+- `id UUID PRIMARY KEY DEFAULT gen_random_uuid()`
+- `user_id UUID NOT NULL` *(tidak memakai `ON DELETE CASCADE` agar status `completed` atau log kegagalan tetap terlacak sampai retensi job habis; tidak menyimpan email/PII)*
+- `idempotency_key TEXT NOT NULL UNIQUE`
+- `state TEXT NOT NULL CHECK (state IN ('requested', 'auth_session_revoked', 'db_unlinked', 'auth_deleted', 'completed', 'failed_retryable', 'failed_manual_intervention'))`
+- `attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0)`
+- `next_retry_at TIMESTAMPTZ`
+- `locked_until TIMESTAMPTZ`
+- `last_error_code TEXT`
+- `last_error_detail TEXT`
+- `created_at TIMESTAMPTZ NOT NULL DEFAULT now()`
+- `updated_at TIMESTAMPTZ NOT NULL DEFAULT now()`
+- `completed_at TIMESTAMPTZ`
+- **Partial Unique Concurrency Guard:** `CREATE UNIQUE INDEX uq_deletion_jobs_active_user ON private.deletion_jobs (user_id) WHERE state <> 'completed';`
 
-#### 11. `private.alias_quarantines`
-- **Tanggung Jawab:** Menegakkan masa tunggu **30 hari** setelah alias dilepas (atau akun dihapus) sebelum `normalized_name` yang sama dapat diklaim lagi, **tanpa** menyimpan `owner_user_id` agar riwayat akun terhapus tetap putus total.
-- **Kolom Utama:**
-  - `id UUID PRIMARY KEY DEFAULT gen_random_uuid()`
-  - `normalized_name TEXT NOT NULL UNIQUE`
-  - `quarantined_until TIMESTAMPTZ NOT NULL`
-  - `created_at TIMESTAMPTZ NOT NULL DEFAULT now()`
+#### 11. `private.alias_ownership` `[APPROVED BY FOUNDER]`
+- `alias_id UUID PRIMARY KEY REFERENCES public.aliases(id) ON DELETE CASCADE`
+- `owner_user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE`
+- `claimed_at TIMESTAMPTZ NOT NULL DEFAULT now()`
 
-#### 12. `private.post_ownership`
-- **Tanggung Jawab:** Memetakan kepemilikan privat `post_id -> owner_user_id` untuk operasi edit, hapus oleh penulis, halaman privat "Tulisan Saya", dan penghapusan akun.
-- **Kolom Utama:**
-  - `post_id UUID PRIMARY KEY REFERENCES public.posts(id) ON DELETE CASCADE`
-  - `owner_user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE`
-  - `created_at TIMESTAMPTZ NOT NULL DEFAULT now()`
-- **Catatan Penghapusan Akun:** Ketika akun dihapus, baris di `private.post_ownership` dihapus secara eksplisit (`DELETE`), sedangkan baris di `public.posts` tetap bertahan sebagai arsip `Anonim` tanpa tautan pemilik.
+#### 12. `private.alias_quarantines` `[APPROVED BY FOUNDER]`
+- `id UUID PRIMARY KEY DEFAULT gen_random_uuid()`
+- `normalized_name TEXT NOT NULL UNIQUE`
+- `quarantined_until TIMESTAMPTZ NOT NULL`
+- `created_at TIMESTAMPTZ NOT NULL DEFAULT now()`
+- **Kepatuhan Privasi:** Tidak menyimpan `former_owner_user_id`. Siapa pun (termasuk pemilik lama) terblokir selama `quarantined_until > now()`.
 
-#### 13. `private.comment_ownership`
-- **Tanggung Jawab:** Memetakan kepemilikan privat `comment_id -> owner_user_id` agar pengguna terverifikasi hanya dapat menghapus komentarnya sendiri.
-- **Kolom Utama:**
-  - `comment_id UUID PRIMARY KEY REFERENCES public.comments(id) ON DELETE CASCADE`
-  - `owner_user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE`
-  - `created_at TIMESTAMPTZ NOT NULL DEFAULT now()`
+#### 13. `private.post_ownership` & 14. `private.comment_ownership` `[APPROVED BY FOUNDER]`
+- `private.post_ownership (post_id UUID PK REFERENCES public.posts(id) ON DELETE CASCADE, owner_user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE, created_at TIMESTAMPTZ NOT NULL DEFAULT now())`
+- `private.comment_ownership (comment_id UUID PK REFERENCES public.comments(id) ON DELETE CASCADE, owner_user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE, created_at TIMESTAMPTZ NOT NULL DEFAULT now())`
+- **Catatan Penghapusan:** RPC penghapusan akun menghapus baris di `private.post_ownership` dan `private.comment_ownership` secara eksplisit sebelum `auth.users` dihapus, sehingga baris `public.posts` dan `public.comments` tetap bertahan tanpa `ON DELETE CASCADE` yang memutus tulisan publik.
 
-#### 14. `private.reports`
-- **Tanggung Jawab:** Menyimpan laporan konten dari akun terverifikasi dengan alasan terstruktur dan penjelasan opsional. Identitas pelapor tidak pernah dibagikan ke penulis terlapor maupun publik.
-- **Kolom Utama:**
-  - `id UUID PRIMARY KEY DEFAULT gen_random_uuid()`
-  - `reporter_user_id UUID REFERENCES auth.users(id) ON DELETE SET NULL` (menjadi `NULL` saat akun pelapor dihapus)
-  - `target_type TEXT NOT NULL` (`CHECK (target_type IN ('post', 'comment'))`)
-  - `target_post_id UUID REFERENCES public.posts(id) ON DELETE CASCADE`
-  - `target_comment_id UUID REFERENCES public.comments(id) ON DELETE CASCADE`
-  - `reason_code TEXT NOT NULL` (`CHECK (reason_code IN ('violence_threat', 'doxxing', 'targeted_harassment', 'csam', 'spam_automation', 'fraud_scam', 'other_safety'))`)
-  - `explanation TEXT` (`CHECK (explanation IS NULL OR char_length(explanation) <= 1000)`)
-  - `status TEXT NOT NULL DEFAULT 'open'` (`CHECK (status IN ('open', 'under_review', 'resolved', 'dismissed'))`)
-  - `created_at TIMESTAMPTZ NOT NULL DEFAULT now()`
+#### 15. `private.reports` `[APPROVED BY FOUNDER]`
+- `id UUID PRIMARY KEY DEFAULT gen_random_uuid()`
+- `reporter_user_id UUID REFERENCES auth.users(id) ON DELETE SET NULL`
+- `target_type TEXT NOT NULL CHECK (target_type IN ('post', 'comment'))`
+- `target_post_id UUID REFERENCES public.posts(id) ON DELETE SET NULL`
+- `target_comment_id UUID REFERENCES public.comments(id) ON DELETE SET NULL`
+- `target_snapshot_id UUID NOT NULL`
+- `reason_code TEXT NOT NULL CHECK (reason_code IN ('violence_threat', 'doxxing', 'targeted_harassment', 'csam', 'spam_automation', 'fraud_scam', 'other_safety'))`
+- `explanation TEXT CHECK (explanation IS NULL OR char_length(explanation) <= 1000)`
+- `status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'under_review', 'resolved', 'dismissed'))`
+- `created_at TIMESTAMPTZ NOT NULL DEFAULT now()`
 - **Constraint:**
-  - Exact target exclusivity: `CHECK ((target_type = 'post' AND target_post_id IS NOT NULL AND target_comment_id IS NULL) OR (target_type = 'comment' AND target_comment_id IS NOT NULL AND target_post_id IS NULL))`
-  - Partial unique anti-spam per reporter: `UNIQUE (reporter_user_id, target_post_id) WHERE target_post_id IS NOT NULL AND reporter_user_id IS NOT NULL` dan `UNIQUE (reporter_user_id, target_comment_id) WHERE target_comment_id IS NOT NULL AND reporter_user_id IS NOT NULL`.
+  - `CHECK ((target_type = 'post' AND target_post_id IS NOT NULL AND target_comment_id IS NULL AND target_snapshot_id = target_post_id) OR (target_type = 'comment' AND target_comment_id IS NOT NULL AND target_post_id IS NULL AND target_snapshot_id = target_comment_id))` *(atau saat target dihapus belakangan, `target_snapshot_id` tetap tersimpan untuk integritas histori laporan)*.
+  - Partial unique per reporter: `UNIQUE (reporter_user_id, target_snapshot_id, target_type) WHERE reporter_user_id IS NOT NULL`.
 
-#### 15. `private.staff_roles`
-- **Tanggung Jawab:** Menetapkan peran `moderator` atau `admin` di sisi database (tidak memakai `user_metadata` JWT yang bisa dimodifikasi klien).
-- **Kolom Utama:**
-  - `user_id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE`
-  - `role TEXT NOT NULL` (`CHECK (role IN ('moderator', 'admin'))`)
-  - `granted_by UUID REFERENCES auth.users(id) ON DELETE SET NULL`
-  - `granted_at TIMESTAMPTZ NOT NULL DEFAULT now()`
+#### 16. `private.staff_roles` `[APPROVED BY FOUNDER]`
+- `user_id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE`
+- `role TEXT NOT NULL CHECK (role IN ('moderator', 'operational_admin', 'privacy_legal_officer', 'super_admin_security'))`
+- `granted_by UUID REFERENCES auth.users(id) ON DELETE SET NULL`
+- `granted_at TIMESTAMPTZ NOT NULL DEFAULT now()`
+- `revoked_at TIMESTAMPTZ`
+- **Aturan Keamanan:** Tidak pernah memakai JWT `user_metadata`; hanya dikelola melalui migrasi/prosedur bootstrap aman atau Super Admin dengan audit log.
 
-#### 16. `private.moderation_actions`
-- **Tanggung Jawab:** Mencatat tindakan moderator (`hide`, `restore`, `remove`, `dismiss_report`) terhadap konten yang melanggar kebijakan keamanan (bukan kritik politik/opini sah).
-- **Kolom Utama:**
-  - `id UUID PRIMARY KEY DEFAULT gen_random_uuid()`
-  - `moderator_user_id UUID REFERENCES auth.users(id) ON DELETE SET NULL`
-  - `target_type TEXT NOT NULL` (`CHECK (target_type IN ('post', 'comment'))`)
-  - `target_post_id UUID REFERENCES public.posts(id) ON DELETE CASCADE`
-  - `target_comment_id UUID REFERENCES public.comments(id) ON DELETE CASCADE`
-  - `action_type TEXT NOT NULL` (`CHECK (action_type IN ('hide', 'restore', 'remove', 'dismiss_report'))`)
-  - `policy_basis TEXT NOT NULL` (mengacu ke kategori pelanggaran yang disetujui)
-  - `internal_note TEXT NOT NULL DEFAULT ''`
-  - `created_at TIMESTAMPTZ NOT NULL DEFAULT now()`
+#### 17. `private.sensitive_access_requests` `[APPROVED BY FOUNDER]` + `[TECHNICAL RECOMMENDATION]`
+- `id UUID PRIMARY KEY DEFAULT gen_random_uuid()`
+- `requested_by UUID NOT NULL REFERENCES auth.users(id) ON DELETE RESTRICT`
+- `approved_by UUID REFERENCES auth.users(id) ON DELETE RESTRICT CHECK (approved_by IS NULL OR approved_by <> requested_by)` *(memaksa persetujuan dua orang)*
+- `purpose_code TEXT NOT NULL CHECK (purpose_code IN ('lawful_request', 'critical_security_incident', 'deletion_recovery'))`
+- `authorization_ref TEXT NOT NULL CHECK (char_length(trim(authorization_ref)) >= 5)`
+- `target_scope_type TEXT NOT NULL`
+- `target_scope_id UUID NOT NULL`
+- `status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected', 'expired', 'revoked'))`
+- `expires_at TIMESTAMPTZ NOT NULL`
+- `created_at TIMESTAMPTZ NOT NULL DEFAULT now()`
+- `approved_at TIMESTAMPTZ`
 
-#### 17. `private.moderation_appeals`
-- **Tanggung Jawab:** Memungkinkan penulis/pemilik konten mengajukan banding terhadap tindakan moderasi atas kontennya tanpa membuka identitas pemilik kepada moderator biasa apabila tidak diperlukan.
-- **Kolom Utama:**
-  - `id UUID PRIMARY KEY DEFAULT gen_random_uuid()`
-  - `moderation_action_id UUID NOT NULL REFERENCES private.moderation_actions(id) ON DELETE CASCADE`
-  - `appellant_user_id UUID REFERENCES auth.users(id) ON DELETE SET NULL`
-  - `appeal_statement TEXT NOT NULL` (`CHECK (char_length(trim(appeal_statement)) BETWEEN 10 AND 2000)`)
-  - `status TEXT NOT NULL DEFAULT 'submitted'` (`CHECK (status IN ('submitted', 'reviewing', 'upheld', 'rejected'))`)
-  - `reviewed_by_user_id UUID REFERENCES auth.users(id) ON DELETE SET NULL`
-  - `resolution_note TEXT`
-  - `created_at TIMESTAMPTZ NOT NULL DEFAULT now()`
-  - `resolved_at TIMESTAMPTZ`
+#### 18. `private.moderation_actions` `[APPROVED BY FOUNDER]` + `[TECHNICAL RECOMMENDATION]`
+- `id UUID PRIMARY KEY DEFAULT gen_random_uuid()`
+- `moderator_user_id UUID REFERENCES auth.users(id) ON DELETE SET NULL`
+- `target_type TEXT NOT NULL CHECK (target_type IN ('post', 'comment'))`
+- `target_post_id UUID REFERENCES public.posts(id) ON DELETE SET NULL` *(Koreksi Teknis #5: mencegah konflik FK saat konten dihapus)*
+- `target_comment_id UUID REFERENCES public.comments(id) ON DELETE SET NULL`
+- `target_snapshot_id UUID NOT NULL`
+- `action_type TEXT NOT NULL CHECK (action_type IN ('hide', 'restore', 'remove', 'dismiss_report'))`
+- `policy_basis TEXT NOT NULL`
+- `internal_note TEXT NOT NULL DEFAULT ''`
+- `created_at TIMESTAMPTZ NOT NULL DEFAULT now()`
 
-#### 18. `private.moderation_audit_logs`
-- **Tanggung Jawab:** Jejak audit internal append-only untuk seluruh tindakan moderasi dan keputusan banding.
-- **Kolom Utama:**
-  - `seq_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY`
-  - `moderation_action_id UUID REFERENCES private.moderation_actions(id) ON DELETE RESTRICT`
-  - `actor_user_id UUID` (tidak memakai FK `CASCADE` agar log tindakan tetap ada meski akun staf/target berubah)
-  - `actor_role TEXT NOT NULL`
-  - `event_type TEXT NOT NULL`
-  - `event_payload JSONB NOT NULL DEFAULT '{}'::jsonb` (tidak boleh menyimpan email/PII)
-  - `prev_hash TEXT NOT NULL`
-  - `entry_hash TEXT NOT NULL`
-  - `created_at TIMESTAMPTZ NOT NULL DEFAULT now()`
-- **Klaim Imutabilitas yang Jujur:** Tabel ini bersifat **append-only pada level role aplikasi dan trigger database** (`BEFORE UPDATE OR DELETE` memicu exception), serta **tamper-evident** melalui rantai hash (`prev_hash` -> `entry_hash`). Secara teknis, tabel PostgreSQL biasa tidak pernah 100% kebal dari administrator superuser database; oleh karena itu, audit sensitif disarankan juga direplikasi ke external log sink pada fase produksi.
+#### 19. `private.moderation_appeals` `[APPROVED BY FOUNDER]` + `[TECHNICAL RECOMMENDATION]`
+- `id UUID PRIMARY KEY DEFAULT gen_random_uuid()`
+- `moderation_action_id UUID NOT NULL REFERENCES private.moderation_actions(id) ON DELETE RESTRICT`
+- `appellant_user_id UUID REFERENCES auth.users(id) ON DELETE SET NULL`
+- `appeal_statement TEXT NOT NULL CHECK (char_length(trim(appeal_statement)) BETWEEN 10 AND 2000)`
+- `status TEXT NOT NULL DEFAULT 'submitted' CHECK (status IN ('submitted', 'reviewing', 'upheld', 'rejected'))`
+- `reviewed_by_user_id UUID REFERENCES auth.users(id) ON DELETE SET NULL`
+- `resolution_note TEXT`
+- `created_at TIMESTAMPTZ NOT NULL DEFAULT now()`
+- `resolved_at TIMESTAMPTZ`
+- **Verifikasi Kepemilikan Privat:** Saat pengajuan banding, sistem server memverifikasi kepemilikan `moderation_action_id -> target_snapshot_id` terhadap `private.post_ownership` atau `private.comment_ownership` milik `auth.uid()` secara privat. **RPC/UI moderator hanya menerima `appeal_id`, `moderation_action_id`, konten terdampak, `policy_basis`, dan `appeal_statement` — TIDAK PERNAH `appellant_user_id`, email, atau tulisan lain.**
 
----
-
-### C. Public Views Strategy (`security_invoker = true`)
-
-Agar API publik memiliki kontrak baca yang bersih tanpa risiko kebocoran kolom maupun bypass RLS:
-
-1. **`public.public_posts_feed` (`WITH (security_invoker = true, security_barrier = true)`):**
-   - Memilih hanya: `p.id`, `p.category_id`, `c.slug AS category_slug`, `c.name AS category_name`, `p.author_mode`, `p.alias_id`, `p.public_author_label`, `p.title`, `left(p.body_plain_text, 280) AS excerpt`, `coalesce(rc.appreciate_count, 0) AS appreciate_count`, `p.published_at`.
-   - Tidak memilih `body_plain_text` penuh atau `search_vector` atau kolom internal apa pun.
-   - Karena `security_invoker = true`, query dari `anon` atau `authenticated` **tetap mengeksekusi RLS pada `public.posts`** (`moderation_status = 'visible'`), sehingga tulisan `hidden` atau `removed` tidak pernah muncul.
-
-2. **`public.public_post_detail` (`WITH (security_invoker = true, security_barrier = true)`):**
-   - Menambahkan `p.body_markdown`, `p.updated_at` untuk halaman baca detail tulisan tunggal.
-
-3. **`public.public_comments_view` (`WITH (security_invoker = true, security_barrier = true)`):**
-   - Memilih: `id`, `post_id`, `parent_comment_id`, `CASE WHEN is_deleted_by_author THEN '[Komentar telah dihapus oleh penulis]' ELSE body_markdown END AS body_markdown`, `'Anonim'::text AS public_author_label`, `is_deleted_by_author`, `created_at`.
+#### 20. `private.moderation_audit_logs` `[TECHNICAL RECOMMENDATION]`
+- `seq_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY`
+- `moderation_action_id UUID REFERENCES private.moderation_actions(id) ON DELETE SET NULL` *(Koreksi Teknis #5: tidak memicu konflik FK)*
+- `action_ref_id UUID` *(salinan UUID agar referensi tidak pernah hilang)*
+- `actor_user_id UUID` *(tanpa FK ke `auth.users` agar log tindakan tetap bertahan jika akun staf dihapus)*
+- `actor_role TEXT NOT NULL`
+- `event_type TEXT NOT NULL`
+- `event_payload JSONB NOT NULL DEFAULT '{}'::jsonb` *(dilarang menyimpan email atau PII pemilik tulisan)*
+- `prev_hash TEXT NOT NULL`
+- `entry_hash TEXT NOT NULL`
+- `created_at TIMESTAMPTZ NOT NULL DEFAULT now()`
+- **Sifat Audit Log:** Append-only di level role aplikasi (`REVOKE UPDATE, DELETE, TRUNCATE`) + trigger `BEFORE UPDATE OR DELETE` + rantai hash *tamper-evident* (`prev_hash` -> `entry_hash`). Secara teknis, DBA superuser PostgreSQL berada di luar batas trust DB internal; oleh karena itu ekspor log periodik ke penyimpanan eksternal disarankan pasca-MVP.
 
 ---
 
-## 5. Relationship Explanations
+### C. Skema `legal_vault` (Terpisah Ketat dari Moderator & Operational Admin)
 
-1. **Akun (`auth.users`) $\leftrightarrow$ Tulisan (`public.posts`):**
-   - Tidak ada FK langsung di `public.posts`. Kepemilikan berada di `private.post_ownership (post_id PK, owner_user_id FK)`.
-   - Konsekuensi positif: dua tulisan `anonymous` milik pengguna yang sama tidak memiliki benang merah apa pun di tabel `public.posts`.
-2. **Akun (`auth.users`) $\leftrightarrow$ Multi-Alias (`public.aliases`):**
-   - Hubungan `1:N` dijembatani oleh `private.alias_ownership (alias_id PK, owner_user_id FK)`.
-   - Satu akun dapat memiliki beberapa baris di `private.alias_ownership`, tetapi dari sisi tabel `public.aliases` tidak ada FK ke `auth.users` dan tidak ada cara mengetahui apakah dua alias dimiliki satu akun.
-3. **Alias (`public.aliases`) $\leftrightarrow$ Tulisan (`public.posts`):**
-   - Hubungan `1:N` opsional melalui `posts.alias_id` (nullable).
-   - Hanya diisi saat `author_mode = 'alias'`. Saat `author_mode = 'anonymous'`, `alias_id` wajib `NULL` (dijaga oleh `CHECK` constraint), sehingga tulisan Anonim tetap terputus total dari alias apa pun milik akun yang sama.
-4. **Tulisan (`public.posts`) $\leftrightarrow$ Komentar (`public.comments`) $\leftrightarrow$ Pemilik Komentar (`private.comment_ownership`):**
-   - Komentar merujuk ke `posts(id)` (`ON DELETE CASCADE`), tetapi kepemilikan komentar diisolasi ke `private.comment_ownership`. Tidak ada tautan ke `aliases` maupun `post_ownership`.
-5. **Laporan (`private.reports`) & Moderasi (`private.moderation_actions`, `private.moderation_appeals`):**
-   - Laporan menargetkan `posts` atau `comments` (eksklusif lewat `CHECK` constraint), bukan `owner_user_id` secara langsung.
-   - Moderator menindak konten (`target_post_id` / `target_comment_id`) dan tidak memerlukan akses baca ke `post_ownership` maupun `comment_ownership`.
+#### 21. `legal_vault.legal_preservation_holds` `[APPROVED BY FOUNDER]` + `[REQUIRES LEGAL REVIEW]`
+- `id UUID PRIMARY KEY DEFAULT gen_random_uuid()`
+- `authority_reference TEXT NOT NULL` *(nomor surat perintah/permintaan sah)*
+- `legal_basis TEXT NOT NULL`
+- `target_scope_type TEXT NOT NULL CHECK (target_scope_type IN ('user', 'post', 'comment', 'report'))`
+- `target_id UUID NOT NULL`
+- `created_by_officer_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE RESTRICT`
+- `approved_by_officer_id UUID REFERENCES auth.users(id) ON DELETE RESTRICT CHECK (approved_by_officer_id IS NULL OR approved_by_officer_id <> created_by_officer_id)`
+- `status TEXT NOT NULL DEFAULT 'pending_approval' CHECK (status IN ('pending_approval', 'active', 'expired', 'released'))`
+- `expires_at TIMESTAMPTZ NOT NULL` *(wajib terbatas waktu; tidak ada hold tanpa kedaluwarsa)*
+- `released_at TIMESTAMPTZ`
+- `release_reason TEXT`
+- `created_at TIMESTAMPTZ NOT NULL DEFAULT now()`
+
+#### 22. `legal_vault.legal_preservation_snapshots` `[TECHNICAL RECOMMENDATION]` + `[REQUIRES LEGAL REVIEW]`
+- `id UUID PRIMARY KEY DEFAULT gen_random_uuid()`
+- `hold_id UUID NOT NULL REFERENCES legal_vault.legal_preservation_holds(id) ON DELETE CASCADE`
+- `record_type TEXT NOT NULL`
+- `source_record_id UUID NOT NULL`
+- `preserved_payload JSONB NOT NULL` *(hanya data dalam ruang lingkup `hold`)*
+- `purge_after TIMESTAMPTZ NOT NULL`
+- `created_at TIMESTAMPTZ NOT NULL DEFAULT now()`
+
+#### 23. `legal_vault.legal_access_logs` `[APPROVED BY FOUNDER]`
+- `seq_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY`
+- `hold_id UUID REFERENCES legal_vault.legal_preservation_holds(id) ON DELETE SET NULL`
+- `sensitive_request_id UUID REFERENCES private.sensitive_access_requests(id) ON DELETE SET NULL`
+- `actor_user_id UUID NOT NULL`
+- `actor_role TEXT NOT NULL`
+- `access_purpose TEXT NOT NULL`
+- `accessed_scope JSONB NOT NULL`
+- `prev_hash TEXT NOT NULL`
+- `entry_hash TEXT NOT NULL`
+- `created_at TIMESTAMPTZ NOT NULL DEFAULT now()`
 
 ---
 
-## 6. RLS Policy Matrix
+### D. Public Views (`WITH (security_invoker = true, security_barrier = true)`)
 
-> **Aturan Baku RLS:**
-> 1. Seluruh tabel di `public` dan `private` mengaktifkan `ALTER TABLE ... ENABLE ROW LEVEL SECURITY;` dan `FORCE ROW LEVEL SECURITY;` (kecuali bypass eksplisit oleh fungsi `SECURITY DEFINER` teraudit atau `service_role` di Astro SSR).
-> 2. Hak akses PostgREST untuk skema `private` **tidak diekspos** (`REVOKE ALL ON SCHEMA private FROM anon, authenticated`).
-> 3. Tidak ada policy yang mengandalkan `user_id` dari payload klien; seluruh pengecekan memakai `auth.uid()` hasil verifikasi JWT.
+- **`public.public_posts_feed`:** Memilih hanya `id`, `category_id`, `category_slug`, `category_name`, `author_mode`, `alias_id`, `public_author_label`, `title`, `excerpt`, `historical_appreciation_count`, `published_at`.
+- **`public.public_post_detail`:** Menambahkan `body_markdown` dan `updated_at`.
+- **`public.public_comments_view`:** Memilih `id`, `post_id`, `parent_comment_id`, `body_markdown` (atau `'[Komentar telah dihapus oleh penulis]'` jika `is_deleted_by_author`), `'Anonim'::text AS public_author_label`, `is_deleted_by_author`, `created_at`.
+- Karena `security_invoker = true`, view selalu berjalan dengan hak pemanggil (`anon` atau `authenticated`) dan **wajib tunduk pada RLS `posts` dan `comments`** (`moderation_status = 'visible'`), serta `security_barrier = true` mencegah optimasi query membocorkan baris tersembunyi melalui fungsi/predikat pengguna.
 
-| Tabel | `anon` (Publik) | `authenticated` (Pengguna Login) | `moderator` / `admin` (via `private.staff_roles`) | `service_role` (Astro SSR / Edge Functions) |
+---
+
+## 5. Updated RLS, Grants & `SECURITY DEFINER` Permission Matrix
+
+### Prinsip Konsistensi Keamanan (Koreksi Teknis #10)
+1. **Exposure PostgREST:** Hanya skema `public` yang dimasukkan ke `Exposed schemas` PostgREST. Skema `private` dan `legal_vault` **dicabut seluruh hak aksesnya** dari `anon` dan `authenticated`:
+   `REVOKE ALL ON SCHEMA private, legal_vault FROM PUBLIC, anon, authenticated;`
+2. **`ENABLE` + `FORCE ROW LEVEL SECURITY`:** Aktif pada **seluruh** tabel di `public`, `private`, dan `legal_vault` agar tidak ada role non-superuser yang dapat melewati RLS.
+3. **Aturan `SECURITY DEFINER` Functions:**
+   - Wajib memiliki `SET search_path = ''` dan merujuk seluruh objek dengan nama skema penuh (`public.*`, `private.*`, `legal_vault.*`).
+   - Wajib memeriksa `auth.uid() IS NOT NULL` (atau dijalankan oleh worker `service_role` pada job internal).
+   - Wajib `REVOKE EXECUTE ON FUNCTION ... FROM PUBLIC, anon;` dan hanya memberi `GRANT EXECUTE` ke `authenticated` atau `service_role` sesuai peruntukannya.
+   - Tidak pernah menerima `p_user_id` bebas dari klien untuk operasi pengguna; selalu memakai `auth.uid()` di dalam fungsi pengguna, dan validasi JWT via `supabase.auth.getUser()` di Astro SSR.
+4. **Pemisahan `service_role` di Astro SSR:** Astro SSR **tidak** menggunakan `service_role` untuk query baca publik (`createServerAnonClient()` dipakai untuk feed/detail publik). `createServerAdminClient()` hanya dipakai pada operasi server terotorisasi setelah verifikasi role staf (`private.staff_roles`) atau operasi sistem (`deletion_jobs`, `legal_vault`).
+
+| Objek / Tabel | `anon` | `authenticated` (Pengguna Biasa) | `moderator` | `operational_admin` | `privacy_legal_officer` | `super_admin_security` |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| `public.categories` | `SELECT` aktif | `SELECT` aktif | `SELECT` | `SELECT`, kelola kategori via SSR | `SELECT` | `SELECT`, kelola via SSR |
+| `public.aliases` | `SELECT` publik | `SELECT`; klaim/rilis **hanya** via RPC (`claim_alias`, `release_alias`) | `SELECT` | `SELECT` | `SELECT` | `SELECT` |
+| `public.post_drafts` | **DENY** | `SELECT/INSERT/UPDATE/DELETE` jika `owner_user_id = auth.uid()` dan akun `active` | **DENY** | **DENY** | **DENY** (kecuali snapshot hold aktif) | **DENY** |
+| `public.posts` | `SELECT` (`visible`) | `SELECT` (`visible`); mutasi via RPC tervalidasi (`publish_post`, `edit_post`, `delete_post`) | `SELECT` semua status (via view/RPC moderasi); ubah status via RPC moderasi | **DENY** edit/hapus konten | `SELECT` dalam scope hold sah | Akses darurat teraudit saja |
+| `public.comments` | `SELECT` (`visible`) | `SELECT` (`visible`); tambah/hapus milik sendiri via RPC | `SELECT` semua status; moderasi via RPC | **DENY** | `SELECT` dalam scope hold sah | Akses darurat teraudit |
+| `public.bookmarks` | **DENY** | `SELECT/INSERT/DELETE` jika `user_id = auth.uid()` | **DENY** | **DENY** | **DENY** | **DENY** |
+| `public.post_reactions` | **DENY** | `SELECT` baris milik sendiri (`user_id = auth.uid()`); mutasi via RPC `toggle_post_reaction` | **DENY** | **DENY** | **DENY** | **DENY** |
+| `public.post_reaction_stats` | `SELECT` | `SELECT` | `SELECT` | `SELECT` | `SELECT` | `SELECT` |
+| `private.user_accounts`, `deletion_jobs` | **DENY** | Baca status akun/deletion milik sendiri via SSR/RPC | **DENY** | Monitor ringkasan status job tanpa email/identitas | Cek konflik hold | Monitor & recovery failure |
+| `private.alias_ownership`, `post_ownership`, `comment_ownership` | **DENY** | Baca daftar milik **sendiri** via SSR/RPC (`owner_user_id = auth.uid()`) | **DENY TOTAL** | **DENY TOTAL** | **Hanya** scope spesifik + two-person approval + audit log | **Hanya** insiden kritis + two-person approval + audit log |
+| `private.alias_quarantines` | **DENY** | Dicek internal di `claim_alias()` | **DENY** | **DENY** | **DENY** | Audit darurat |
+| `private.reports` | **DENY** | Kirim laporan & lihat status laporan milik sendiri (`reporter_user_id = auth.uid()`) | Baca laporan **tanpa `reporter_user_id`** melalui view/RPC khusus moderator | Agregat non-identitas saja | Scope hold sah | Audit insiden |
+| `private.moderation_actions`, `moderation_appeals` | **DENY** | Pemilik konten terdampak lihat ringkasan alasan + ajukan banding milik sendiri | Review & putuskan tindakan/banding **tanpa identitas pelapor/pemilik** | Agregat operasional saja | Scope hold sah | Audit & review |
+| `private.moderation_audit_logs` | **DENY** | **DENY** | Baca log tindakan moderasinya (tanpa PII) | Baca statistik operasional tanpa PII | Audit terkait kasus sah | Baca penuh (tanpa edit/hapus) |
+| `legal_vault.*` | **DENY** | **DENY** | **DENY** | **DENY** | Kelola hold & akses snapshot terotorisasi (2-person approval) | Co-approver & audit akses `legal_access_logs` |
+
+---
+
+## 6. Reaction Aggregate Semantics `[APPROVED BY FOUNDER]`
+
+1. **Pemisahan Record Individu vs. Angka Historis:**
+   - **`public.post_reactions`** adalah catatan privat per pengguna (`user_id`, `post_id`) yang berfungsi hanya untuk menegakkan aturan *1 apresiasi per akun per tulisan* serta menampilkan status apakah pengguna saat ini sudah memberi apresiasi.
+   - **`public.post_reaction_stats.historical_appreciation_count`** adalah **penghitung apresiasi historis publik** milik tulisan tersebut.
+2. **Makna Angka yang Ditampilkan di UI/API:**
+   - Label dan dokumentasi UI menyatakan bahwa angka tersebut merepresentasikan **total apresiasi historis yang diterima tulisan** sepanjang waktu (tidak berkurang ketika akun pemberi apresiasi dihapus di kemudian hari).
+3. **Mekanisme Penghindaran Decrement Tidak Disengaja (Koreksi Teknis #4):**
+   - **Tidak ada trigger `AFTER DELETE ON public.post_reactions`** yang mengurangi `post_reaction_stats`.
+   - Perubahan count hanya terjadi melalui fungsi **`public.toggle_post_reaction(p_post_id)`**:
+     - Jika baris `(post_id, auth.uid())` belum ada: `INSERT` ke `post_reactions` + `UPDATE post_reaction_stats SET historical_appreciation_count = historical_appreciation_count + 1`.
+     - Jika pengguna **aktif** mencabut apresiasinya: `DELETE` baris tersebut di dalam RPC yang sama + `UPDATE post_reaction_stats SET historical_appreciation_count = GREATEST(0, historical_appreciation_count - 1)`.
+   - Saat akun dihapus: `DELETE FROM public.post_reactions WHERE user_id = p_user_id;` menghapus seluruh asosiasi individu, **dan karena tidak ada trigger `AFTER DELETE`, `historical_appreciation_count` tidak berkurang dan tidak menciptakan kebocoran korelasi waktu pada tulisan target.**
+
+---
+
+## 7. Alias Release Transaction `[APPROVED BY FOUNDER]`
+
+Saat pengguna aktif melepas salah satu aliasnya melalui Astro SSR -> RPC `private.release_own_alias(p_alias_id UUID)`:
+
+1. **Validasi Kepemilikan & Status Akun:**
+   - Kunci baris `private.user_accounts WHERE user_id = auth.uid() FOR UPDATE` dan pastikan `account_status = 'active'`.
+   - Kunci baris `private.alias_ownership WHERE alias_id = p_alias_id AND owner_user_id = auth.uid() FOR UPDATE`. Jika tidak ditemukan, tolak (`403/404`).
+   - Ambil `normalized_name` dari `public.aliases WHERE id = p_alias_id FOR UPDATE`.
+2. **Konversi Tulisan Historis ke `Anonim` Tanpa Mengubah Timestamp:**
+   - Set `SET LOCAL unsaid.suppress_updated_at = 'on';` (trigger `posts` tidak menaikkan `updated_at`).
+   - Jalankan:
+     ```sql
+     UPDATE public.posts
+     SET
+       author_mode = 'anonymous',
+       alias_id = NULL,
+       public_author_label = 'Anonim'
+     WHERE alias_id = p_alias_id;
+     ```
+     *(Isi tulisan, `published_at`, dan `updated_at` asli dipertahankan utuh.)*
+   - Bersihkan referensi draf yang memakai alias tersebut:
+     ```sql
+     UPDATE public.post_drafts
+     SET selected_alias_id = NULL, author_mode = 'anonymous'
+     WHERE selected_alias_id = p_alias_id AND owner_user_id = auth.uid();
+     ```
+3. **Karantina 30 Hari Tanpa Menyimpan Mantan Pemilik:**
+   - Masukkan ke `private.alias_quarantines (normalized_name, quarantined_until = now() + interval '30 days')` (`ON CONFLICT (normalized_name) DO UPDATE SET quarantined_until = GREATEST(private.alias_quarantines.quarantined_until, EXCLUDED.quarantined_until)`).
+   - **Tidak ada** kolom `former_owner_user_id`.
+4. **Penghapusan Kepemilikan & Alias:**
+   - `DELETE FROM private.alias_ownership WHERE alias_id = p_alias_id;`
+   - `DELETE FROM public.aliases WHERE id = p_alias_id;`
+5. **Aturan Klaim Ulang (`private.claim_alias`):**
+   - Mengambil `pg_advisory_xact_lock(hashtext(v_normalized_name))`.
+   - Menghapus entri karantina yang sudah lewat (`WHERE normalized_name = v_normalized_name AND quarantined_until <= now()`).
+   - Jika masih ada baris karantina aktif (`quarantined_until > now()`), **ditolak untuk semua akun termasuk mantan pemilik**.
+   - Setelah 30 hari lewat, siapa pun dapat mengklaimnya secara atomik.
+
+---
+
+## 8. Account Deletion State Machine & Recovery Strategy `[APPROVED BY FOUNDER]`
+
+Karena penghapusan akun melibatkan **dua sistem terpisah** — transaksi PostgreSQL lokal dan panggilan HTTP eksternal ke **Supabase Auth Admin API (`auth.admin.deleteUser`)** — keduanya tidak dapat digabung dalam satu transaksi ACID PostgreSQL. Oleh karena itu digunakan **durable job state machine** di `private.deletion_jobs`:
+
+```text
+  [requested]
+       │
+       ▼  (1. Verifikasi sesi & konfirmasi eksplisit -> set account_status = 'pending_deletion',
+       │      cabut refresh token/sesi aktif di Auth; JANGAN beri ban permanen dulu)
+  [auth_session_revoked]
+       │
+       ▼  (2. ACID PostgreSQL transaction: cek legal_preservation_holds -> snapshot scope sah
+       │      -> anonymize alias posts [tanpa ubah updated_at] -> quarantine aliases 30d
+       │      -> hapus ownership, drafts, bookmarks, reactions, personal data -> anonymize reports/appeals)
+  [db_unlinked] ◄─── (Idempotent checkpoint: tidak boleh rollback setelah commit)
+       │
+       ├──► (3a. Panggil supabaseAdmin.auth.admin.deleteUser(user_id) sukses) ──► [auth_deleted] ──► [completed]
+       │
+       └──► (3b. Gagal transient API / timeout) ──► [failed_retryable]
+                                                          │
+                                                          ├──► Retry otomatis (worker cron / Edge Function) ──► [auth_deleted] ──► [completed]
+                                                          └──► Batas retry habis ──► [failed_manual_intervention] (Notifikasi Super Admin/Security)
+```
+
+### Perlindungan Concurrency, Idempotency & Anti-Lockout Permanen (Koreksi Teknis #1, #2, #3, #12)
+1. **Pencegahan Data Baru Saat Penghapusan Berjalan:**
+   - Segera setelah `account_status` menjadi `'pending_deletion'`, seluruh policy RLS dan RPC penulisan (`post_drafts`, `claim_alias`, `publish_post`, `comments`, `bookmarks`, `post_reactions`, `reports`, `appeals`) memeriksa `EXISTS (SELECT 1 FROM private.user_accounts ua WHERE ua.user_id = auth.uid() AND ua.account_status = 'active')`. Permintaan paralel langsung ditolak (`409 ACCOUNT_DELETION_IN_PROGRESS`).
+2. **Tidak Terkunci Permanen Jika Step DB Gagal:**
+   - Sebelum `db_unlinked` berhasil di-commit, server **tidak** menjatuhkan ban permanen pada `auth.users` — hanya mencabut sesi dan menampilkan status penghapusan. Jika transaksi DB gagal sebelum `db_unlinked` (`ROLLBACK` penuh):
+     - Worker dapat mencoba ulang secara aman (`execute_account_deletion` mengunci baris `user_accounts FOR UPDATE`).
+     - Jika terjadi kegagalan permanen sebelum data dihapus dan melebihi batas percobaan (`failed_manual_intervention`), Super Admin/Security dapat melakukan pemulihan atau menyelesaikan job secara teraudit — pengguna tidak pernah terjebak dalam akun yang terkunci setengah mati tanpa jejak.
+3. **Jika Step `auth.admin.deleteUser()` Gagal Setelah `db_unlinked`:**
+   - Seluruh data pribadi dan kepemilikan sudah terputus di database (`db_unlinked`).
+   - Worker terjadwal (Supabase Edge Function + `pg_cron`) membaca `deletion_jobs WHERE state = 'failed_retryable' AND next_retry_at <= now()` dengan `FOR UPDATE SKIP LOCKED` dan mengulang `auth.admin.deleteUser(user_id)`.
+   - Apabila pengguna mencoba login lagi sebelum `auth_deleted` selesai, SSR memeriksa `deletion_jobs` dan menolak akses workspace sambil memicu penyelesaian `deleteUser` secara idempoten.
+4. **Resolusi Konflik Foreign Key:**
+   - `execute_account_deletion` menghapus `private.post_ownership`, `private.comment_ownership`, `private.alias_ownership`, `public.aliases`, `public.post_drafts`, `public.bookmarks`, `public.post_reactions`, serta mengatur `reporter_user_id = NULL` pada `private.reports` dan meredaksi/menghapus `private.moderation_appeals` milik pengguna **sebelum** `auth.admin.deleteUser(user_id)` dipanggil, sehingga cascade `auth.users` tidak pernah menyentuh `public.posts` atau `public.comments` maupun menabrak `ON DELETE RESTRICT` di `moderation_audit_logs`.
+
+---
+
+## 9. Four-Tier Staff Access Model & Sensitive Access Controls `[APPROVED BY FOUNDER]`
+
+| Tier / Role | Cakupan Wewenang | Data yang Boleh Diakses | Data yang **Dilarang** Diakses | Kontrol Tambahan |
 | :--- | :--- | :--- | :--- | :--- |
-| `public.categories` | `SELECT` (`is_active = true`) | `SELECT` (`is_active = true`) | `SELECT` semua; mutasi via admin SSR | Full access |
-| `public.aliases` | `SELECT` (hanya `id, display_name, normalized_name, created_at`) | `SELECT`; klaim/hapus hanya via RPC `claim_alias()` / `release_alias()` | `SELECT` | Full access |
-| `public.post_drafts` | **DENY ALL** | `SELECT`, `INSERT`, `UPDATE`, `DELETE` hanya jika `owner_user_id = auth.uid()` | **DENY ALL** (draf privat tidak boleh dibaca moderator) | Full access (SSR only) |
-| `public.posts` | `SELECT` hanya jika `moderation_status = 'visible'` | `SELECT` jika `moderation_status = 'visible'`; mutasi (terbit/edit/hapus) melalui Astro SSR / RPC tervalidasi | `SELECT` semua status (untuk review laporan); mutasi status hanya melalui RPC moderasi | Full access |
-| `public.comments` | `SELECT` hanya jika `moderation_status = 'visible'` dan parent post `'visible'` | `SELECT` sama seperti publik; tambah/hapus melalui Astro SSR / RPC tervalidasi | `SELECT` semua status; mutasi status hanya melalui RPC moderasi | Full access |
-| `public.bookmarks` | **DENY ALL** | `SELECT`, `INSERT`, `DELETE` hanya jika `user_id = auth.uid()` | **DENY ALL** | Full access |
-| `public.post_reactions` | **DENY ALL** (mencegah korelasi `user_id`) | `SELECT`, `INSERT`, `DELETE` hanya baris milik `user_id = auth.uid()` | **DENY ALL** | Full access |
-| `public.post_reaction_counts` | `SELECT` semua (hanya agregat) | `SELECT` semua | `SELECT` semua | Mutasi via trigger/RPC internal |
-| `private.user_accounts` | **DENY ALL** (skema tidak diekspos) | Baca status akun sendiri via SSR/RPC | Baca status terbatas via RPC admin | Full access |
-| `private.alias_ownership` | **DENY ALL** | Baca daftar alias miliknya sendiri via SSR/RPC `owner_user_id = auth.uid()` | **DENY ALL** (mencegah moderator mengaitkan multi-alias) | Full access |
-| `private.alias_quarantines` | **DENY ALL** | Hanya dicek di dalam RPC `claim_alias()` | **DENY ALL** | Full access |
-| `private.post_ownership` | **DENY ALL** | Baca "Tulisan Saya" via SSR/RPC `owner_user_id = auth.uid()` | **DENY ALL** (least privilege; cukup konten, tanpa identitas penulis) | Full access |
-| `private.comment_ownership` | **DENY ALL** | Cek komentar miliknya sendiri via SSR/RPC `owner_user_id = auth.uid()` | **DENY ALL** | Full access |
-| `private.reports` | **DENY ALL** | Kirim laporan via SSR/RPC; pelapor dapat melihat status laporannya sendiri (`reporter_user_id = auth.uid()`) **tanpa** membuka ke terlapor | `SELECT` laporan tanpa `reporter_user_id` (via view/RPC moderator) | Full access |
-| `private.staff_roles` | **DENY ALL** | **DENY ALL** | `SELECT` role milik sendiri | Full access (Admin bootstrap/CLI) |
-| `private.moderation_actions` | **DENY ALL** | Penulis konten terdampak hanya melihat ringkasan alasan kebijakan (tanpa identitas moderator) via SSR/RPC | `SELECT`, `INSERT` via RPC moderasi tervalidasi | Full access |
-| `private.moderation_appeals` | **DENY ALL** | `INSERT` / `SELECT` hanya milik `appellant_user_id = auth.uid()` | `SELECT`, `UPDATE` status banding via RPC moderasi | Full access |
-| `private.moderation_audit_logs` | **DENY ALL** | **DENY ALL** | `SELECT` saja (hanya `admin` untuk audit); **NO `UPDATE` / `DELETE`** | `INSERT`, `SELECT` saja (`UPDATE`/`DELETE` diblokir trigger) |
+| **1. `moderator`** | Review antrean laporan, sembunyikan/pulihkan/hapus konten, tanggapi banding (berdasarkan konten & kebijakan). | Konten post/komentar dilaporkan, `reason_code`, `explanation`, histori tindakan konten, teks banding (`appeal_statement`). | `email`, `auth.users`, `reporter_user_id`, `appellant_user_id`, `post_ownership`, `alias_ownership`, `comment_ownership`, `legal_vault.*`. | Tidak bisa melihat tulisan lain milik pelapor/penulis yang sama. |
+| **2. `operational_admin`** | Kelola kategori, pantau kesehatan sistem, metrik agregat non-PII, dan antrean `deletion_jobs` yang macet. | `categories`, agregat jumlah non-PII, status `deletion_jobs` tanpa email/konten privat. | Isi `post_drafts`, `post_ownership`, `alias_ownership`, `email`, detail laporan pribadi, `legal_vault.*`. | Perubahan kategori/config dicatat di log operasional. |
+| **3. `privacy_legal_officer`** | Menangani permintaan data sah sesuai hukum dan mengelola `legal_preservation_holds`. | HANYA objek spesifik di dalam `legal_preservation_holds` / `sensitive_access_requests` yang sudah disetujui dan belum kedaluwarsa. | Penjelajahan bebas (*unrestricted browsing*) lintas akun/tulisan di luar scope surat sah. | Wajib tujuan terdokumentasi, minimum necessary data, **two-person approval**, kedaluwarsa otomatis, & audit log *tamper-evident*. |
+| **4. `super_admin_security`** | Infrastruktur kritis, respons insiden keamanan darurat, manajemen role staf, dan *co-approver* akses sensitif. | Konfigurasi keamanan, log audit, manajemen `staff_roles`, dan persetujuan bersama atas insiden kritis. | Dilarang melakukan penjelajahan identitas penulis tanpa `sensitive_access_requests` berotorisasi & *two-person approval*. | Akses darurat tetap menghasilkan entri `legal_access_logs` / `moderation_audit_logs` berantai hash; perubahan role staf diaudit. |
 
 ---
 
-## 7. Privacy and Anonymity Threat Analysis
+## 10. Legal Preservation & Data Retention Design `[APPROVED BY FOUNDER]` + `[REQUIRES LEGAL REVIEW]`
 
-| Ancaman / Vektor Serangan | Dampak Jika Terjadi | Mitigasi Struktural dalam Arsitektur |
+### Mekanisme Legal Preservation (`legal_vault`)
+1. **Terbatas Ruang Lingkup & Waktu:** Setiap hold wajib mencantumkan `authority_reference`, `legal_basis`, `target_scope_type`, `target_id`, dan `expires_at` yang terhingga. Tidak ada hold tanpa batas waktu.
+2. **Interaksi dengan Penghapusan Akun:**
+   - Sebelum `execute_account_deletion` menghapus data privat, transaksi memeriksa `legal_vault.legal_preservation_holds WHERE status = 'active' AND expires_at > now()`.
+   - Jika tidak ada hold aktif: seluruh data pribadi dihapus tuntas.
+   - Jika ada hold aktif atas entitas spesifik (misalnya tulisan X terkait ancaman kekerasan/CSAM atau permintaan penegak hukum sah):
+     - **Hanya record di dalam scope hold tersebut** yang disalin secara atomik ke `legal_vault.legal_preservation_snapshots` dengan `purge_after = hold.expires_at`.
+     - **Data pribadi lain milik pengguna di luar scope hold** (draf lain, bookmark, alias lain, tulisan lain) **tetap dihapus dan diputus kepemilikannya** sesuai hak penghapusan akun!
+     - Di lapisan publik, tulisan tetap diproses sesuai status moderasi/anonimitas tanpa membocorkan eksistensi proses hukum kepada pengguna lain.
+3. **Release & Auto-Purge:** Saat `expires_at` tercapai atau pejabat legal merilis hold (`status = 'released'`), snapshot yang tidak diperpanjang secara sah dihapus oleh job pembersih terjadwal dan dicatat di `legal_access_logs`.
+
+### Kategori Retensi Data (Menunggu Penetapan Angka Final via Legal Review)
+| Kategori Data | Perilaku Saat Akun Dihapus | Usulan Kerangka Retensi (`[REQUIRES LEGAL REVIEW]`) |
 | :--- | :--- | :--- |
-| **1. Kebocoran Kolom Pemilik via PostgREST `select=*`** | Identitas penulis/komentator langsung terekspos walau RLS aktif. | Kolom `owner_user_id` dan `commenter_user_id` **tidak ada sama sekali** di `public.posts`, `public.comments`, dan `public.aliases`. Dipindahkan ke skema `private`. |
-| **2. Korelasi Antar-Tulisan Anonim atau Antar-Alias** | Pembaca/penyerang mengetahui dua tulisan Anonim atau dua Alias dimiliki akun yang sama. | Tidak ada `public_author_id`, hash user, atau FK antar-alias. `posts.alias_id` wajib `NULL` saat mode `anonymous`. |
-| **3. Korelasi Waktu (`updated_at`) Saat Penghapusan Akun** | Jika penghapusan akun mengubah `posts.updated_at = now()`, pengamat dapat mencocokkan waktu penghapusan akun dengan tulisan mantan alias yang baru berubah menjadi `Anonim`. | Trigger/prosedur penghapusan akun **secara eksplisit mempertahankan nilai `updated_at` lama** saat mengubah tulisan mantan alias menjadi `Anonim` (menggunakan bypass GUC internal `SET LOCAL unsaid.suppress_updated_at = 'on'`), dan tidak menyentuh baris tulisan yang memang sudah `anonymous`. |
-| **4. Korelasi Urutan / Timing Komentar & Penanda OP** | Pembaca menebak penulis asli di kolom komentar. | `public.comments` tidak menyimpan `alias_id`, `is_op`, atau `user_id`; label selalu `'Anonim'`. |
-| **5. Race Condition Klaim Alias Unik & Masa Karantina 30 Hari** | Dua akun mengklaim alias yang sama bersamaan, atau merebut alias tepat setelah dilepas/dihapus. | Normalisasi kanonik (`normalized_name` UNIQUE), `pg_advisory_xact_lock` per `normalized_name`, dan tabel `private.alias_quarantines` tanpa `owner_user_id`. |
-| **6. Kebocoran Identitas Pelapor ke Terlapor** | Intimidasi balik (*retaliation*) terhadap pelapor. | `private.reports` tidak diekspos ke pemilik konten terlapor; notifikasi moderasi hanya memuat jenis pelanggaran (`policy_basis`), bukan `reporter_user_id`. |
-| **7. Eskalasi Privilege Moderator / Klien (`user_metadata`)** | Pengguna biasa memalsukan role moderator melalui `supabase.auth.updateUser()` atau moderator mengintip identitas pemilik tulisan Anonim. | Role moderator disimpan di `private.staff_roles` (bukan `user_metadata`), dan moderator hanya diberi akses ke konten & laporan, **bukan** ke `private.post_ownership`, `private.alias_ownership`, atau `private.comment_ownership`. |
-| **8. Bypass RLS Melalui Public Views** | View PostgreSQL default berjalan sebagai owner view sehingga mengabaikan RLS pada `posts`. | Semua view publik wajib dideklarasikan dengan `WITH (security_invoker = true, security_barrier = true)`. |
-| **9. XSS / Injeksi HTML / Tracking Pixel di Konten** | Pencurian sesi atau pelacakan IP pembaca via `<img>` / `<iframe>` / `javascript:` URL. | MVP text-only: validasi Zod + sanitasi Markdown AST di Astro SSR sebelum `INSERT/UPDATE`, menolak tag HTML mentah, embed, gambar eksternal, serta hanya mengizinkan skema URL `http://` dan `https://`. |
-| **10. Audit Log Palsu / Klaim Imutabilitas Berlebihan** | Pengubahan diam-diam oleh proses internal atau kepercayaan palsu bahwa log tak tersentuh. | `moderation_audit_logs` diberi trigger penolak `UPDATE`/`DELETE`, pembatasan hak role DB, dan `prev_hash`/`entry_hash` *tamper-evident* (dengan catatan jujur bahwa superuser DB tetap di luar batas isolasi PostgreSQL lokal). |
+| **Data akun aktif, draf, bookmark, kepemilikan alias/post/komentar, `post_reactions`** | Dihapus permanen (kecuali scope spesifik yang terkena hold sah). | Selama akun aktif; catatan non-aktif berkepanjangan perlu tinjauan UU PDP. |
+| **Karantina alias (`private.alias_quarantines`)** | Masuk karantina 30 hari tanpa `owner_user_id`. | Tetap 30 hari (`[APPROVED BY FOUNDER]`), lalu auto-purge saat `quarantined_until <= now()`. |
+| **Laporan (`private.reports`)** | `reporter_user_id` di-NULL-kan; isi laporan tetap untuk penyelesaian moderasi. | Retensi terbatas pasca-penutupan kasus (misal 90–180 hari untuk laporan `dismissed`, atau sesuai kebijakan hukum untuk kasus keselamatan serius). |
+| **Tindakan moderasi & banding** | `appellant_user_id` di-NULL-kan dan pernyataan banding pribadi dibersihkan jika akun dihapus. | Retensi terdefinisi untuk akuntabilitas banding & pola penyalahgunaan berulang (tanpa menyimpan PII akun yang sudah dihapus). |
+| **Log audit keamanan & `deletion_jobs`** | Tanpa email/PII penulis; hanya ID tugas/audit teknis. | Retensi terdefinisi (misal 1–2 tahun untuk audit keamanan; perlu verifikasi UU PDP & kepatuhan insiden). |
+| **Snapshot preservasi hukum (`legal_vault`)** | Terisolasi hanya untuk scope hold aktif. | Dibatasi ketat sampai `expires_at` / `released_at`; dilarang retensi permanen tanpa dasar hukum aktif. |
 
 ---
 
-## 8. Account Deletion Transaction Strategy
+## 11. Authentication Architecture: Email OTP + Optional Passkey
 
-Penghapusan akun adalah operasi berisiko tinggi karena harus **memutus kepemilikan secara permanen**, **mengubah mantan tulisan alias menjadi Anonim**, **menjaga tulisan publik tetap ada**, dan **menghapus seluruh data pribadi** secara atomik tanpa menyisakan *orphaned secret links* atau kebocoran korelasi waktu.
+> **Status Verifikasi Dokumentasi & SDK:** Diverifikasi terhadap tipe paket `@supabase/auth-js@2.119.2` yang terpasang melalui `@supabase/supabase-js@2.119.2` dan dokumentasi resmi Supabase Auth.
 
-### Alur Transaksi Multi-Tahap yang Aman
+### 1. Metode Login Utama MVP: Email OTP `[APPROVED BY FOUNDER]`
+- Menggunakan `supabase.auth.signInWithOtp({ email, options: { shouldCreateUser: true } })` diikuti `supabase.auth.verifyOtp({ email, token, type: 'email' })` melalui Astro SSR auth handler (`@supabase/ssr`).
+- **Rekomendasi Teknis:** Gunakan kode OTP 6-digit (bukan hanya magic link) sebagai jalur utama agar kebal terhadap pemindai link otomatis (*corporate email link scanners*) yang sering menghanguskan token sekali pakai, serta tetap berfungsi lancar di browser in-app Android/iOS.
+- Email disimpan eksklusif oleh Supabase Auth (`auth.users`) dan tidak pernah disalin ke tabel `public.*`.
 
-1. **Verifikasi & Konfirmasi Eksplisit (Astro SSR):**
-   - Server memverifikasi sesi aktif via `supabase.auth.getUser()` (bukan `getSession()` yang tidak memverifikasi ulang JWT) serta memerlukan re-autentikasi terbaru atau frasa konfirmasi eksplisit dari pengguna.
-   - Server segera memblokir login baru / mencabut sesi aktif akun di Supabase Auth (`ban_duration` sementara atau revoke refresh tokens) sebelum mutasi database dimulai agar tidak ada request paralel dari perangkat lain milik pengguna yang membuat draf/alias baru di tengah transaksi.
-
-2. **Transaksi Atomik PostgreSQL (`private.execute_account_deletion(p_user_id UUID)`):**
-   Dijalankan dalam satu transaksi ACID tunggal (`BEGIN ... COMMIT`, jika gagal `ROLLBACK` penuh):
-   - **Langkah A — Kunci Baris Kepemilikan:** Kunci akun pada `private.user_accounts` (`FOR UPDATE`) dan tandai `account_status = 'pending_deletion'`.
-   - **Langkah B — Konversi Mantan Tulisan Alias Menjadi Anonim Tanpa Mengubah `updated_at`:**
-     - Ambil daftar `alias_id` dan `normalized_name` milik `p_user_id` dari `private.alias_ownership JOIN public.aliases`.
-     - Masukkan `normalized_name` ke `private.alias_quarantines` (`quarantined_until = now() + interval '30 days'`, tanpa `owner_user_id`) dengan `ON CONFLICT (normalized_name) DO UPDATE SET quarantined_until = GREATEST(private.alias_quarantines.quarantined_until, EXCLUDED.quarantined_until)`.
-     - Set variabel lokal transaksi `SET LOCAL unsaid.suppress_updated_at = 'on';` agar trigger `updated_at` pada `posts` tidak menandai waktu penghapusan akun.
-     - Jalankan:
-       ```sql
-       UPDATE public.posts
-       SET
-         author_mode = 'anonymous',
-         alias_id = NULL,
-         public_author_label = 'Anonim'
-       WHERE alias_id = ANY(v_alias_ids);
-       ```
-   - **Langkah C — Putus Kepemilikan Tulisan & Komentar:**
-     - `DELETE FROM private.post_ownership WHERE owner_user_id = p_user_id;` (tulisan di `public.posts` tetap utuh).
-     - `DELETE FROM private.comment_ownership WHERE owner_user_id = p_user_id;` (komentar di `public.comments` tetap utuh sebagai `Anonim`).
-   - **Langkah D — Hapus Data Pribadi, Draf, Alias, Bookmark, Reaksi, dan Anonimkan Referensi Laporan/Banding:**
-     - `DELETE FROM public.post_drafts WHERE owner_user_id = p_user_id;`
-     - `DELETE FROM public.bookmarks WHERE user_id = p_user_id;`
-     - `DELETE FROM public.post_reactions WHERE user_id = p_user_id;` (serta sinkronkan ulang `public.post_reaction_counts` pada post terkait—catatan: perubahan hitungan reaksi sebaiknya hanya dilakukan jika diperlukan atau dikaji dampak korelasi waktunya; lihat Bagian 11).
-     - `UPDATE private.reports SET reporter_user_id = NULL WHERE reporter_user_id = p_user_id;`
-     - `DELETE FROM private.moderation_appeals WHERE appellant_user_id = p_user_id AND status IN ('submitted', 'reviewing');` dan `UPDATE private.moderation_appeals SET appellant_user_id = NULL, appeal_statement = '[dihapus bersama akun]' WHERE appellant_user_id = p_user_id;`
-     - `DELETE FROM private.alias_ownership WHERE owner_user_id = p_user_id;`
-     - `DELETE FROM public.aliases WHERE id = ANY(v_alias_ids);`
-     - `DELETE FROM private.user_accounts WHERE user_id = p_user_id;`
-
-3. **Penghapusan Identitas Auth (`supabaseAdmin.auth.admin.deleteUser(p_user_id)`):**
-   - Dijalankan setelah transaksi SQL `COMMIT`.
-   - Menghapus baris `auth.users`, `auth.identities`, `auth.sessions`, dan kredensial Passkey/WebAuthn terkait.
-   - Jika langkah HTTP Auth API ini gagal sementara, akun sudah berada dalam kondisi terblokir + data pribadi sudah terhapus, dan retry idempoten dapat memanggil `deleteUser(p_user_id)` ulang tanpa merusak integritas publik.
+### 2. Metode Tambahan Opsional: Passkeys (WebAuthn) `[APPROVED BY FOUNDER]`
+- **Dukungan SDK Terverifikasi:** `@supabase/supabase-js@2.119.2` menyediakan API Passkey native (`supabase.auth.registerPasskey()`, `supabase.auth.signInWithPasskey()`, `supabase.auth.passkey.*`) tanpa memerlukan tabel WebAuthn kustom di database aplikasi pada MVP.
+- **Prasyarat Infrastruktur Server (`[REQUIRES FOUNDER APPROVAL]` / Verifikasi Proyek):** Passkeys pada server GoTrue Supabase berstatus **Beta** dan harus diaktifkan pada proyek Supabase target (`Authentication -> Passkeys`, `RP ID`, `RP Name`, dan `RP Origins`).
+- **Alur Enrollment, Removal, Recovery & Fallback (`[TECHNICAL RECOMMENDATION]`):**
+  1. **Enrollment:** Hanya dapat dilakukan saat pengguna sudah memiliki sesi Email OTP terverifikasi. UI meminta nama label perangkat ramah pengguna dan memanggil `supabase.auth.registerPasskey()`.
+  2. **Removal:** Pengguna dapat mencabut Passkey tertentu di pengaturan akun (`supabase.auth.passkey.list()` dan `supabase.auth.passkey.delete({ id })`). **Penghapusan Passkey selalu aman tanpa risiko lockout karena Email OTP tetap aktif.**
+  3. **Fallback & Recovery:** Jika perangkat hilang, WebAuthn diblokir oleh in-app browser/WebView, atau environment preview berjalan dalam cross-origin iframe yang membatasi `Permissions-Policy` `publickey-credentials-*`, pengguna langsung dapat masuk dengan **Email OTP** yang sama.
 
 ---
 
-## 9. Indexing and Performance Considerations
+## 12. Security & Privacy Threat Analysis (Updated)
 
-1. **Feed Publik & Kategori (Pagination Cursor-Based, Bukan `OFFSET`):**
-   - `CREATE INDEX idx_posts_visible_feed ON public.posts (published_at DESC, id DESC) WHERE moderation_status = 'visible';`
-   - `CREATE INDEX idx_posts_visible_category_feed ON public.posts (category_id, published_at DESC, id DESC) WHERE moderation_status = 'visible';`
-   - *Partial index* menjaga ukuran indeks kecil dengan mengabaikan konten `hidden`/`removed`.
-2. **Halaman Alias & Tulisan Terkait:**
-   - `CREATE INDEX idx_posts_visible_alias ON public.posts (alias_id, published_at DESC) WHERE moderation_status = 'visible' AND alias_id IS NOT NULL;`
-3. **Pencarian Teks Bahasa Indonesia:**
-   - `CREATE INDEX idx_posts_search_gin ON public.posts USING GIN (search_vector);`
-   - Catatan: pertimbangkan juga indeks `pg_trgm` pada `title` jika diperlukan pencocokan substring/typo.
-4. **Komentar pada Detail Tulisan:**
-   - `CREATE INDEX idx_comments_post_visible ON public.comments (post_id, created_at ASC) WHERE moderation_status = 'visible';`
-5. **Operasi Privat Pemilik (Dasbor "Tulisan Saya", Draf, Bookmark, Alias):**
-   - `CREATE INDEX idx_post_drafts_owner_updated ON public.post_drafts (owner_user_id, updated_at DESC);`
-   - `CREATE INDEX idx_post_ownership_owner ON private.post_ownership (owner_user_id, created_at DESC);`
-   - `CREATE INDEX idx_alias_ownership_owner ON private.alias_ownership (owner_user_id);`
-   - `CREATE INDEX idx_comment_ownership_owner ON private.comment_ownership (owner_user_id);`
-   - `CREATE INDEX idx_bookmarks_user_created ON public.bookmarks (user_id, created_at DESC);`
-6. **Karantina Alias & Antrean Moderasi:**
-   - `CREATE INDEX idx_alias_quarantines_until ON private.alias_quarantines (quarantined_until);`
-   - `CREATE INDEX idx_reports_open_created ON private.reports (status, created_at ASC) WHERE status IN ('open', 'under_review');`
-   - `CREATE INDEX idx_moderation_actions_target ON private.moderation_actions (target_type, target_post_id, target_comment_id, created_at DESC);`
+| Risiko / Vektor Ancaman | Mitigasi Struktural dalam Revisi Proposal |
+| :--- | :--- |
+| **Kebocoran kolom kepemilikan via PostgREST** | Kolom pemilik tidak ada di `public.posts`, `public.comments`, dan `public.aliases`; seluruh tabel kepemilikan berada di skema `private` yang tidak diekspos PostgREST. |
+| **Account deletion lockout jika Auth API / DB gagal** | State machine `private.deletion_jobs` memisahkan checkpoint `db_unlinked` dan `auth_deleted`, tidak memakai ban permanen sebelum DB unlinked, dan menyediakan retry worker idempoten + recovery path. |
+| **Pengurangan hitungan reaksi mengungkap waktu hapus akun** | `public.post_reaction_stats` tidak memiliki trigger `AFTER DELETE` pada `post_reactions`; penghapusan `post_reactions` saat hapus akun membiarkan `historical_appreciation_count` tetap utuh. |
+| **Korelasi waktu (`updated_at` / `published_at`)** | Pelepasan alias & penghapusan akun menonaktifkan bump `updated_at` via GUC lokal transaksi (`unsaid.suppress_updated_at`) dan tidak menyentuh tulisan `anonymous`. |
+| **Konflik FK antara moderasi, banding, audit log, dan hapus akun** | `moderation_actions` & `moderation_audit_logs` memakai `ON DELETE SET NULL` + `target_snapshot_id`/`action_ref_id` sehingga penghapusan data pribadi atau konten tidak memicu deadlock `ON DELETE RESTRICT`. |
+| **Moderator mengintip identitas pelapor/pengaju banding/penulis** | Moderator dibatasi hanya pada view/RPC konten & laporan ter-sanitasi tanpa `reporter_user_id`, `appellant_user_id`, `post_ownership`, `alias_ownership`, dan `legal_vault`. |
+| **Penyalahgunaan akses Super Admin / Legal** | Pemisahan 4-tier, `sensitive_access_requests` dengan `approved_by <> requested_by` (*two-person approval*), scope waktu terbatas, dan `legal_access_logs` berantai hash. |
+| **Asumsi keliru `indonesian` FTS** | Validasi pre-flight terhadap `pg_ts_config` di lingkungan Supabase target + fallback ke `'simple'` & `pg_trgm`. |
 
 ---
 
-## 10. Testing Plan
+## 13. Indexing & Performance Considerations
 
-Seluruh validasi akan dibagi ke dalam 3 lapisan uji (Vitest, PostgreSQL/PostgREST Integration Tests, dan Playwright E2E) sebelum peluncuran fitur:
-
-1. **Unit Tests (Vitest — Cepat & Deterministik):**
-   - Validasi Zod untuk input tulisan (memastikan puisi 1–5 karakter diterima tanpa minimum 20 karakter, menolak panjang berlebih, menolak HTML/iframe/`javascript:` URI).
-   - Normalisasi nama alias (case-folding, spasi ganda, kata terlarang seperti `anonim` / `admin`).
-   - Sanitasi payload publik (`assertPublicPayloadSanitized`) menolak semua field terlarang.
-
-2. **Database & RLS Integration Tests (PostgreSQL + PostgREST Langsung):**
-   - Menguji akses **langsung ke PostgREST** menggunakan `anon` key dan JWT dua pengguna berbeda (`User A`, `User B`) serta `Moderator`:
-     - `anon` memanggil `GET /rest/v1/posts?select=*` -> memverifikasi respons **tidak** memiliki kolom `owner_user_id`, `email`, atau `ip_address`.
-     - `anon` atau `User B` mencoba mengakses skema `private` (`post_ownership`, `alias_ownership`, `comment_ownership`, `reports`, `moderation_audit_logs`) -> wajib gagal (`401/403/404`).
-     - `User B` mencoba membaca/mengedit/menghapus `post_drafts` atau `bookmarks` milik `User A` -> wajib ditolak RLS (`0` baris).
-     - `User A` memiliki 2 tulisan `anonymous` dan 2 alias berbeda -> verifikasi melalui query publik bahwa tidak ada kolom/token yang mengorelasikan ke-4 entitas tersebut.
-     - Uji `security_invoker = true`: tulisan dengan `moderation_status = 'hidden'` tidak muncul melalui `public_posts_feed` maupun `public_post_detail` bagi `anon` dan `User B`.
-     - Uji konkurensi: 2 permintaan paralel mengklaim nama alias yang sama (`Promise.all`) -> tepat 1 berhasil, 1 ditolak; rilis alias memblokir klaim ulang selama 30 hari di `alias_quarantines`.
-
-3. **Transaksi Penghapusan Akun & Uji End-to-End (Playwright + DB Assertion):**
-   - Skenario penuh: `User A` membuat draf, klaim alias, menerbitkan 1 tulisan Anonim + 1 tulisan Alias, menulis komentar, menyimpan bookmark, mengirim laporan, lalu menghapus akun dengan konfirmasi eksplisit.
-   - Verifikasi pasca-hapus:
-     - `User A` tidak dapat login lagi (`auth.users` terhapus).
-     - `post_drafts`, `bookmarks`, `alias_ownership`, `post_ownership`, `comment_ownership`, dan `aliases` milik `User A` bernilai `0` baris.
-     - Tulisan Anonim dan mantan tulisan Alias tetap dapat dibaca publik sebagai `Anonim`, `updated_at` tidak berubah ke waktu penghapusan, dan alias tersebut terkunci selama 30 hari di `alias_quarantines`.
+- **Feed Publik & Kategori (Cursor Pagination):** Partial index pada `public.posts (published_at DESC, id DESC) WHERE moderation_status = 'visible'` dan `(category_id, published_at DESC, id DESC) WHERE moderation_status = 'visible'`.
+- **Halaman Alias:** Partial index `(alias_id, published_at DESC) WHERE moderation_status = 'visible' AND alias_id IS NOT NULL`.
+- **Pencarian Teks:** `GIN (search_vector)` + opsional `pg_trgm` GIN pada `title` dan `body_plain_text` untuk frasa pendek/puisi.
+- **Komentar, Draf, Bookmark, Ownership:** Indeks komposit pada `(post_id, created_at ASC)`, `(owner_user_id, updated_at DESC)`, dan `(owner_user_id)` di tabel `private.*_ownership`.
+- **Job & Karantina:** Indeks parsial pada `private.deletion_jobs (state, next_retry_at) WHERE state IN ('requested', 'auth_session_revoked', 'db_unlinked', 'failed_retryable')` dan `private.alias_quarantines (quarantined_until)`.
 
 ---
 
-## 11. Unresolved Questions and Trade-offs
+## 14. Updated Integration & E2E Testing Plan
 
-Berikut adalah keputusan desain spesifik yang perlu konfirmasi Founder/PM sebelum pembuatan skema SQL aktual dimulai:
-
-1. **Perilaku Tulisan Saat Pengguna Melepas Satu Alias (Tanpa Menghapus Akun):**
-   - *Pertanyaan:* Ketika akun aktif melepas satu alias (masuk karantina 30 hari), apakah tulisan lama di bawah alias tersebut:
-     - **(Opsi A — Disarankan untuk Konsistensi Privasi):** Diubah menjadi `Anonim` (`alias_id = NULL`, `public_author_label = 'Anonim'`), persis seperti saat penghapusan akun, atau
-     - **(Opsi B):** Tetap menampilkan label historis alias sementara `alias_id` diputus dan nama masuk karantina?
-   - *Trade-off:* Opsi A mencegah penulis kehilangan kendali jika nanti alias diklaim ulang setelah 30 hari (pembaca tidak mengira tulisan lama ditulis oleh pemilik baru alias tersebut!).
-
-2. **Apakah Pemilik Lama Boleh Mengklaim Ulang Aliasnya Sendiri Selama Masa Karantina 30 Hari?**
-   - *Pertanyaan:* Selama masa karantina 30 hari pasca-rilis alias, apakah larangan berlaku untuk **semua pengguna termasuk pemilik sebelumnya**, atau pemilik lama boleh membatalkan rilis?
-   - *Trade-off:* Jika ownership langsung dihapus saat rilis (untuk privasi maksimal), tidak ada data pemilik lama untuk memulihkannya, sehingga karantina berlaku universal bagi semua akun selama 30 hari.
-
-3. **Dampak Korelasi Reaksi (`post_reactions`) Saat Penghapusan Akun:**
-   - *Pertanyaan:* Saat akun dihapus, apakah baris `post_reactions` milik akun tersebut dihapus (yang menyebabkan `appreciate_count` pada tulisan terkait turun tepat pada saat penghapusan akun), atau hitungan agregat dipertahankan (`user_id` dihapus/di-anonymize dari `post_reactions` setelah mengunci agregat)?
-   - *Trade-off:* Menghapus `post_reactions` + menurunkan `appreciate_count` sedikit berisiko korelasi waktu pada tulisan sepi, namun menjaga akurasi jumlah reaksi; menghapus `user_id` (atau tidak menurunkan count agregat) menghilangkan korelasi waktu namun membuat total reaksi tidak lagi 1:1 dengan baris `post_reactions`.
-
-4. **Banding Moderasi oleh Penulis setelah Penghapusan Kepemilikan vs Selama Akun Aktif:**
-   - *Pertanyaan:* Jika seorang moderator menyembunyikan tulisan Anonim/Alias, mekanisme banding (`moderation_appeals`) memanfaatkan `private.post_ownership` untuk memvalidasi bahwa pengaju banding memang penulis sah. Apakah aturan ini tetap menjaga identitas pengaju banding tersembunyi dari **moderator tingkat 1** yang meninjau ulang?
-   - *Rekomendasi:* Ya — UI/RPC peninjauan banding menampilkan nomor tiket banding dan konten, tanpa membuka email atau daftar tulisan lain milik `appellant_user_id`.
-
-5. **Kebijakan Email OTP vs Passkey-Only & Kredensial Proyek Supabase (`PENDING_PRODUCT_APPROVAL` lama dari Task 001):**
-   - Sesuai `docs/UNSAID_PRODUCT_DECISIONS.md`, keputusan mengenai apakah Email OTP tetap aktif permanen setelah Passkey terdaftar serta penyediaan kredensial proyek Supabase (Cloud/Self-hosted, region, RP ID/Origin) masih perlu diputuskan sebelum implementasi autentikasi dan migrasi dijalankan.
+1. **Vitest Unit Tests:**
+   - Validasi input teks (puisi 1–5 karakter diterima, HTML/script/iframe/`javascript:` URI ditolak).
+   - Normalisasi nama alias & deteksi kata terlarang.
+   - `assertPublicPayloadSanitized()` pada seluruh bentuk respons publik.
+2. **PostgreSQL & PostgREST Direct Security/RLS Tests:**
+   - Akses langsung `anon` dan JWT `User A`, `User B`, `Moderator`, `Operational Admin`, `Privacy/Legal Officer` ke PostgREST:
+     - Verifikasi `private.*` dan `legal_vault.*` tidak dapat diakses via PostgREST (`401/403/404`).
+     - Verifikasi `public_posts_feed` & `public_post_detail` mematuhi `security_invoker = true` (konten `hidden`/`removed` tidak muncul).
+     - Verifikasi `Moderator` **gagal** membaca `post_ownership`, `alias_ownership`, `reporter_user_id`, `appellant_user_id`, dan `legal_vault`.
+     - Verifikasi `Operational Admin` **gagal** membaca `post_drafts`, `post_ownership`, dan `legal_vault`.
+   - Uji konkurensi klaim alias, karantina 30 hari (mantan pemilik juga terblokir), dan klaim ulang hari ke-31.
+   - Uji pelepasan alias dan penghapusan akun:
+     - Simulasi kegagalan HTTP `auth.admin.deleteUser()` -> job masuk `failed_retryable` -> retry sukses menjadi `completed` tanpa mengunci atau merusak integritas tulisan publik.
+     - Simulasi request paralel pembuatan draf/komentar saat `account_status = 'pending_deletion'` -> ditolak.
+     - Verifikasi `published_at`, `updated_at`, dan `historical_appreciation_count` **tidak berubah** saat akun dihapus, sementara `post_reactions`, `bookmarks`, `post_drafts`, dan `alias_ownership` bersih terhapus.
+     - Verifikasi **scoped legal hold**: hanya record di dalam scope hold yang disalin ke `legal_vault.legal_preservation_snapshots`; data lain tetap terhapus dan auto-purge berjalan saat `expires_at` lewat.
+   - Uji `pg_ts_config` untuk pencarian teks Bahasa Indonesia.
+3. **Playwright E2E Tests:**
+   - Alur Email OTP login -> buat draf -> klaim alias -> terbit Anonim & Alias -> rilis alias (verifikasi post berubah menjadi `Anonim`) -> komentar Anonim -> apresiasi -> lapor -> review moderator (verifikasi identitas pelapor/pemilik tidak muncul di UI moderator) -> hapus akun & verifikasi tulisan publik tetap tersedia sebagai `Anonim`.
 
 ---
 
-## 12. Recommended Implementation Sequence
+## 15. Open Questions, Legal Review Items & Implementation Prerequisites
 
-1. **Tahap 1 — Pengesahan Proposal & Keputusan Terbuka:** Review proposal ini bersama PM dan Founder serta putuskan 5 butir trade-off pada Bagian 11 + kesiapan proyek Supabase.
-2. **Tahap 2 — Penyiapan Proyek Supabase & Pipeline Migrasi (`supabase/`):** Inisialisasi struktur `supabase/migrations/`, konfigurasikan `.env` lokal (di luar Git), dan aktifkan ekstensi yang diperlukan (`pgcrypto`, `pg_trgm` jika dipilih).
-3. **Tahap 3 — Implementasi Skema Fondasi & Fungsi Transaksional:** Buat migrasi untuk skema `private` dan `public`, constraint integritas, trigger `updated_at` (dengan dukungan `suppress_updated_at`), view publik (`security_invoker = true`), serta RPC (`claim_alias`, `release_alias`, `publish_post`, `execute_account_deletion`).
-4. **Tahap 4 — Penerapan & Pengujian Aktif RLS (Gate Keamanan):** Jalankan pengujian langsung terhadap PostgREST dan Vitest untuk memastikan nol kebocoran kolom pemilik, nol korelasi Anonim/Multi-Alias, dan transaksi penghapusan akun berjalan atomik.
-5. **Tahap 5 — Integrasi Autentikasi (Email OTP + Passkeys Adapter) & Fitur MVP Bertahap:** Hubungkan Astro SSR BFF secara bertahap: Kategori & Feed Publik $\rightarrow$ Editor Teks & Draf $\rightarrow$ Komentar Anonim $\rightarrow$ Pelaporan & Moderasi $\rightarrow$ Manajemen Akun & Hapus Akun.
+### A. Items Requiring Legal Review (`[REQUIRES LEGAL REVIEW]`)
+1. Penetapan durasi retensi pasti untuk masing-masing kategori data (laporan tertutup, log moderasi/banding, log audit keamanan, dan akun tidak aktif jangka panjang) sesuai UU PDP Indonesia.
+2. Persyaratan hukum formal untuk aktivasi, perpanjangan, batas maksimum masa berlaku (`expires_at`), dan prosedur notifikasi (atau larangan pemberitahuan) pada `legal_vault.legal_preservation_holds` sesuai UU ITE / KUHAP / UU PDP.
+3. Kebijakan penghapusan/redaksi konten yang melanggar hukum berat (misalnya CSAM atau doxxing berbahaya) ketika pemilik akun meminta penghapusan akun atau berada di bawah kewajiban hukum tertentu.
+
+### B. Items Still Requiring Founder Approval (`[REQUIRES FOUNDER APPROVAL]`)
+1. **Batas Kuota Alias & Rate Limit Harian:** Apakah perlu batas jumlah alias aktif per akun (misalnya maksimal 5 alias aktif per akun) untuk mencegah penyalahgunaan/penimbunan nama alias global?
+2. **Kebijakan Komentar pada Tulisan yang Penulisnya Menghapus Akun:** Konfirmasi apakah tulisan publik milik akun terhapus tetap terbuka untuk komentar baru atau tetap mengikuti pengaturan standar tulisan publik.
+3. **Kebijakan Penghentian/Pemblokiran Akun oleh Super Admin:** Dalam kondisi darurat penyalahgunaan ekstrem (spam otomatis/CSAM), konfirmasi apakah `suspended` account hanya mencegah publikasi baru atau juga memicu penyembunyian konten aktif oleh moderasi.
+
+### C. Technical Prerequisites Before TASK 004B / SQL Implementation
+1. **Kredensial & Proyek Supabase Aktif:** Penyediaan proyek Supabase (Cloud/Self-hosted), region database, `PUBLIC_SUPABASE_URL`, `PUBLIC_SUPABASE_ANON_KEY`, dan `SUPABASE_SERVICE_ROLE_KEY`.
+2. **Validasi `pg_ts_config`:** Eksekusi `SELECT cfgname FROM pg_ts_config WHERE cfgname = 'indonesian';` pada instance Supabase target untuk menentukan konfigurasi FTS utama vs fallback `'simple'`.
+3. **Konfigurasi Email OTP & Passkeys di Supabase Auth:** Setup SMTP/template email OTP Bahasa Indonesia serta konfirmasi `RP ID`, `RP Name`, dan `RP Origins` jika Passkey Beta diaktifkan di proyek Supabase target.
+4. **Persetujuan Arsitektur:** Review arsitektur oleh ChatGPT dan persetujuan eksplisit dari Founder atas dokumen revisi ini sebelum penulisan migrasi SQL dimulai.
