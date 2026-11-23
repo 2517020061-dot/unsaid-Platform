@@ -31,7 +31,7 @@ Seluruh dokumen ini memisahkan secara tegas kategori setiap desain dan keputusan
      - **Email OTP** tersedia melalui `signInWithOtp()` dan `verifyOtp()`.
      - **Passkeys (WebAuthn)** tersedia pada SDK klien (`registerPasskey()`, `signInWithPasskey()`, `auth.passkey.*`, serta `auth.admin.passkey.*`), sementara flag `experimental.passkey` di klien berstatus `@deprecated`. Namun, fitur server-side Passkeys di GoTrue Supabase masih berstatus Beta dan membutuhkan aktivasi eksplisit pada proyek Supabase target.
    - `src/lib/supabase/browser.ts` hanya membaca `PUBLIC_SUPABASE_URL` & `PUBLIC_SUPABASE_ANON_KEY`.
-   - `src/server/services/supabase.ts` menyediakan `createServerAnonClient()` (untuk akses anonim publik) dan `createServerAdminClient()` (memakai `SUPABASE_SERVICE_ROLE_KEY`, komunikasi melalui PostgREST).
+   - `src/server/services/supabase.ts` menyediakan `createServerAnonClient()` (untuk akses anonim publik) dan `createServerAdminClient()` (memakai `SUPABASE_SERVICE_ROLE_KEY`, komunikasi melalui PostgREST). *(Catatan: Helper `createServerUserClient(cookies)` berbasis `@supabase/ssr` untuk sesi JWT `authenticated` belum ada di codebase saat ini dan akan ditambahkan pada fase implementasi.)*
 3. **Konfigurasi Environment & Guard (`src/validation/env.ts`, `src/config/public.ts`, `src/config/server.ts`, `.env.example`):**
    - `.env.example` hanya berisi placeholder (`PUBLIC_APP_URL`, `PUBLIC_SUPABASE_URL`, `PUBLIC_SUPABASE_ANON_KEY`, `APP_URL`, `SUPABASE_SERVICE_ROLE_KEY`).
    - `assertNoSecretLeakage()` menolak prefix publik untuk secret server, dan `src/config/server.ts` memblokir impor pada runtime browser.
@@ -43,7 +43,8 @@ Seluruh dokumen ini memisahkan secara tegas kategori setiap desain dan keputusan
 ### Infrastruktur & Kapabilitas yang Belum Terverifikasi (Memerlukan Proyek Supabase Live)
 - **Belum ada proyek Supabase live** (cloud maupun self-hosted) atau kredensial database aktif di environment ini.
 - **Konfigurasi FTS Bahasa Indonesia (`pg_ts_config`):** Keberadaan aktual `cfgname = 'indonesian'` pada instance Supabase target **belum terverifikasi** secara langsung dan wajib dicek pada pre-flight migrasi dengan fallback `'simple'` + `pg_trgm`.
-- **Aktivasi Passkeys Beta & SMTP OTP:** Ketersediaan `GOTRUE_PASSKEY_ENABLED=true`, konfigurasi `RP ID`/`RP Origins`, serta pengiriman email OTP pada proyek Supabase target belum terverifikasi.
+- **Hak Role & Trigger Skema `auth` di Supabase Managed:** Kemampuan membuat trigger `AFTER INSERT ON auth.users` serta izin `CREATE ROLE` non-`BYPASSRLS` (`unsaid_app_definer`) pada Postgres Supabase Cloud target **belum terverifikasi** sampai proyek live tersedia.
+- **Aktivasi Passkeys Beta, Pencabutan Sesi Server-Side & SMTP OTP:** Ketersediaan `GOTRUE_PASSKEY_ENABLED=true`, konfigurasi `RP ID`/`RP Origins`, perilaku pencabutan sesi GoTrue apabila worker asinkron tidak memegang `jwt` pengguna, serta pengiriman email OTP pada proyek Supabase target belum terverifikasi.
 - **Ekstensi `pg_cron` & KMS Eksternal:** Ketersediaan `pg_cron` / Edge Function scheduler serta kunci KMS/KEK eksternal untuk `legal_vault` belum tersedia sampai infrastruktur proyek disiapkan.
 
 ---
@@ -211,6 +212,7 @@ erDiagram
         uuid moderation_action_id FK
         uuid appellant_user_id FK "Nullable on deletion"
         text appeal_statement
+        boolean is_redacted_by_deletion "True when redacted on account deletion"
         text status "submitted | reviewing | upheld | rejected"
         uuid reviewed_by_user_id FK "Nullable"
         text resolution_note
@@ -297,7 +299,7 @@ erDiagram
     LEGAL_PRESERVATION_SNAPSHOTS {
         uuid id PK "legal_vault.legal_preservation_snapshots"
         uuid hold_id FK
-        text record_type
+        text record_type "user_account | auth_identity | post | comment | post_draft | report | ownership_link | alias_ownership | bookmark | post_reaction | moderation_action | moderation_appeal"
         uuid source_record_id
         text encryption_algorithm "AES-256-GCM"
         text key_id "External KMS/KEK version"
@@ -306,7 +308,7 @@ erDiagram
         bytea auth_tag "128-bit AEAD tag"
         bytea encrypted_payload "Ciphertext only (not JSONB)"
         text payload_sha256
-        timestamptz purge_after
+        timestamptz purge_after "Synced with hold.expires_at / released_at"
         timestamptz created_at
     }
 
@@ -397,7 +399,7 @@ erDiagram
 - **Constraint Identitas Publik:**  
   `CHECK ((author_mode = 'anonymous' AND alias_id IS NULL AND public_author_label = 'Anonim') OR (author_mode = 'alias' AND alias_id IS NOT NULL AND public_author_label <> 'Anonim'))`
 - **Proteksi Timestamp & FTS (`[TECHNICAL RECOMMENDATION]`):**
-  - Trigger `trg_posts_before_update` hanya memperbarui `updated_at = now()` bila kolom konten (`title`, `body_markdown`, `category_id`) berubah **DAN** `current_setting('unsaid.suppress_updated_at', true) IS DISTINCT FROM 'on'`. Pelepasan alias dan penghapusan akun tidak pernah mengubah `published_at` maupun `updated_at`.
+  - Trigger `trg_posts_before_update` **hanya** memperbarui `updated_at = now()` bila kolom konten (`title`, `body_markdown`, `body_plain_text`, `category_id`) berubah **DAN** `current_setting('unsaid.suppress_updated_at', true) IS DISTINCT FROM 'on'`. Pembaruan `body_plain_text` dan `search_vector` selalu disinkronkan dalam trigger yang sama ketika `title` atau `body_markdown` berubah. Pelepasan alias dan penghapusan akun tidak pernah mengubah `published_at` maupun `updated_at`.
   - Pre-flight migrasi wajib mengecek `SELECT cfgname FROM pg_ts_config WHERE cfgname = 'indonesian'`. Trigger `trg_posts_search_vector` memakai konfigurasi tervalidasi (`indonesian` jika tersedia di `pg_ts_config`, atau fallback `'simple'` + indeks GIN `pg_trgm`).
 
 #### 4. `public.comments` `[APPROVED BY FOUNDER]`
@@ -409,6 +411,7 @@ erDiagram
 - `is_deleted_by_author BOOLEAN NOT NULL DEFAULT FALSE`
 - `created_at TIMESTAMPTZ NOT NULL DEFAULT now()`
 - **Larangan Kolom:** Tidak ada `commenter_user_id`, `alias_id`, maupun `is_op`.
+- **Proteksi Privasi Komentar Terhapus (`[TECHNICAL RECOMMENDATION — Koreksi Audit M-1]`):** Karena `public.comments` memberi `SELECT` kepada `anon`/`authenticated` agar `public_comments_view` (`security_invoker = true`) dapat berjalan, RPC `public.rpc_delete_own_comment(p_comment_id)` **wajib menimpa langsung kolom `body_markdown = '[Komentar telah dihapus oleh penulis]'`** di tabel `public.comments` bersamaan dengan `is_deleted_by_author = TRUE` (setelah memastikan snapshot `legal_vault` dibuat terlebih dahulu apabila ada hold aktif). Dengan demikian, akses REST langsung ke `/rest/v1/comments` tidak pernah dapat membaca isi komentar asli yang telah dihapus penulis.
 
 #### 5. `public.post_reaction_stats` `[APPROVED BY FOUNDER]` + `[TECHNICAL RECOMMENDATION]`
 - `post_id UUID PRIMARY KEY REFERENCES public.posts(id) ON DELETE CASCADE`
@@ -419,12 +422,16 @@ erDiagram
 
 ### B. Skema `private` (TIDAK Diekspos PostgREST — Seluruh Data Akun, Kepemilikan, Draf, Bookmark, Reaksi & Moderasi)
 
-#### 6. `private.user_accounts` `[TECHNICAL RECOMMENDATION]`
+#### 6. `private.user_accounts` `[TECHNICAL RECOMMENDATION — Koreksi Audit M-2]`
 - `user_id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE`
 - `account_status TEXT NOT NULL DEFAULT 'active' CHECK (account_status IN ('active', 'pending_deletion', 'deletion_failed', 'suspended'))`
 - `deletion_requested_at TIMESTAMPTZ`
 - `created_at TIMESTAMPTZ NOT NULL DEFAULT now()`
 - `updated_at TIMESTAMPTZ NOT NULL DEFAULT now()`
+- **Mekanisme Inisialisasi / Provisioning Pengguna Baru Email OTP:**
+  1. **Jalur Utama (Database Trigger):** Trigger `AFTER INSERT ON auth.users` (`private.handle_new_auth_user()`, `SECURITY DEFINER`, `SET search_path = ''`) otomatis menyisipkan `(NEW.id, 'active')` ke `private.user_accounts` (`ON CONFLICT (user_id) DO NOTHING`) pada saat `signInWithOtp(..., { shouldCreateUser: true })` menciptakan baris baru di `auth.users`.
+  2. **Jaring Pengaman SSR (Jika Trigger Skema `auth` Dibatasi di Supabase Cloud / Akun Lama):** Astro SSR Auth Callback (setelah `verifyOtp` + `getUser()`) memanggil `public.rpc_ensure_user_account()` (`authenticated` JWT). Fungsi ini memeriksa terlebih dahulu apakah terdapat `private.deletion_jobs WHERE user_id = auth.uid()` yang aktif (`state <> 'completed'`) — bila ada, **menolak provisioning ulang (`409 ACCOUNT_DELETION_IN_PROGRESS`)**; bila tidak ada dan `user_accounts` belum tercipta, menyisipkan `(auth.uid(), 'active')` secara idempoten.
+  - *Trade-off:* Kombinasi trigger `auth.users` + fallback `rpc_ensure_user_account()` di callback login memastikan pengguna baru tidak pernah gagal di RPC penulisan, sekaligus mencegah *race condition* pembuatan ulang akun saat proses penghapusan berjalan.
 
 #### 7. `private.deletion_jobs` `[APPROVED BY FOUNDER]` + `[TECHNICAL RECOMMENDATION]`
 - `id UUID PRIMARY KEY DEFAULT gen_random_uuid()`
@@ -503,7 +510,10 @@ erDiagram
 - `explanation TEXT CHECK (explanation IS NULL OR char_length(explanation) <= 1000)`
 - `status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'under_review', 'resolved', 'dismissed'))`
 - `created_at TIMESTAMPTZ NOT NULL DEFAULT now()`
-- **Constraint:** Partial unique per reporter: `UNIQUE (reporter_user_id, target_snapshot_id, target_type) WHERE reporter_user_id IS NOT NULL`.
+- **Constraint Integritas Target (`[TECHNICAL RECOMMENDATION — Koreksi Audit M-4]`):**
+  - `CHECK ((target_type = 'post' AND target_comment_id IS NULL) OR (target_type = 'comment' AND target_post_id IS NULL))` *(mencegah target silang/ganda, sambil tetap aman saat `ON DELETE SET NULL` terjadi di kemudian hari)*.
+  - Trigger `BEFORE INSERT` memvalidasi bahwa saat laporan dibuat: `(target_type = 'post' AND target_post_id IS NOT NULL AND target_snapshot_id = target_post_id)` atau `(target_type = 'comment' AND target_comment_id IS NOT NULL AND target_snapshot_id = target_comment_id)`.
+  - Partial unique per reporter: `UNIQUE (reporter_user_id, target_snapshot_id, target_type) WHERE reporter_user_id IS NOT NULL`.
 
 #### 16. `private.staff_roles` `[APPROVED BY FOUNDER]`
 - `user_id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE`
@@ -536,19 +546,24 @@ erDiagram
 - `policy_basis TEXT NOT NULL`
 - `internal_note TEXT NOT NULL DEFAULT ''`
 - `created_at TIMESTAMPTZ NOT NULL DEFAULT now()`
+- **Constraint Integritas Target (`[TECHNICAL RECOMMENDATION — Koreksi Audit M-4]`):**
+  - `CHECK ((target_type = 'post' AND target_comment_id IS NULL) OR (target_type = 'comment' AND target_post_id IS NULL))`.
+  - Trigger `BEFORE INSERT` memvalidasi kesesuaian awal `target_snapshot_id = COALESCE(target_post_id, target_comment_id)`.
 
 #### 19. `private.moderation_appeals` `[APPROVED BY FOUNDER]` + `[TECHNICAL RECOMMENDATION]`
 - `id UUID PRIMARY KEY DEFAULT gen_random_uuid()`
 - `moderation_action_id UUID NOT NULL REFERENCES private.moderation_actions(id) ON DELETE RESTRICT`
 - `appellant_user_id UUID REFERENCES auth.users(id) ON DELETE SET NULL`
 - `appeal_statement TEXT NOT NULL CHECK (char_length(trim(appeal_statement)) BETWEEN 10 AND 2000)`
+- `is_redacted_by_deletion BOOLEAN NOT NULL DEFAULT FALSE` *(Koreksi Audit M-4)*
 - `status TEXT NOT NULL DEFAULT 'submitted' CHECK (status IN ('submitted', 'reviewing', 'upheld', 'rejected'))`
 - `reviewed_by_user_id UUID REFERENCES auth.users(id) ON DELETE SET NULL`
 - `resolution_note TEXT`
 - `created_at TIMESTAMPTZ NOT NULL DEFAULT now()`
 - `resolved_at TIMESTAMPTZ`
+- **Redaksi Saat Hapus Akun:** Saat `db_unlinked`, daripada mengosongkan teks (yang akan melanggar `CHECK BETWEEN 10 AND 2000`), sistem menyetel `appellant_user_id = NULL`, `is_redacted_by_deletion = TRUE`, dan `appeal_statement = '[Pernyataan banding dihapus bersama penghapusan akun]'` (53 karakter).
 
-#### 20. `private.moderation_audit_logs` `[TECHNICAL RECOMMENDATION]`
+#### 20. `private.moderation_audit_logs` `[TECHNICAL RECOMMENDATION — Koreksi Audit M-5]`
 - `seq_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY`
 - `moderation_action_id UUID REFERENCES private.moderation_actions(id) ON DELETE SET NULL`
 - `action_ref_id UUID`
@@ -559,6 +574,7 @@ erDiagram
 - `prev_hash TEXT NOT NULL`
 - `entry_hash TEXT NOT NULL`
 - `created_at TIMESTAMPTZ NOT NULL DEFAULT now()`
+- **Serialisasi Rantai Hash (Mencegah Hash-Chain Fork):** Seluruh penulisan wajib lewat fungsi internal `private.append_moderation_audit_log(...)` yang di awal eksekusinya mengambil `PERFORM pg_advisory_xact_lock(hashtext('unsaid_moderation_audit_chain'));` sebelum membaca `entry_hash` terbaru (`ORDER BY seq_id DESC LIMIT 1`) dan menghitung `entry_hash` baru. `UPDATE`, `DELETE`, dan `TRUNCATE` ditolak oleh `REVOKE` serta trigger proteksi.
 
 ---
 
@@ -577,11 +593,12 @@ erDiagram
 - `released_at TIMESTAMPTZ`
 - `release_reason TEXT`
 - `created_at TIMESTAMPTZ NOT NULL DEFAULT now()`
+- **Sinkronisasi Perpanjangan/Pelepasan Hold (`[TECHNICAL RECOMMENDATION — Koreksi Audit M-3]`):** Setiap pembaruan `expires_at` (perpanjangan sah) melalui `rpc_legal_manage_hold` dan trigger `AFTER UPDATE OF expires_at, status ON legal_vault.legal_preservation_holds` wajib memperbarui `purge_after` pada seluruh baris terkait di `legal_vault.legal_preservation_snapshots` (`purge_after = NEW.expires_at` saat diperpanjang, atau `COALESCE(NEW.released_at, now())` bila `status = 'released'`).
 
-#### 22. `legal_vault.legal_preservation_snapshots` `[TECHNICAL RECOMMENDATION — Koreksi Audit #5]` + `[REQUIRES LEGAL REVIEW]`
+#### 22. `legal_vault.legal_preservation_snapshots` `[TECHNICAL RECOMMENDATION — Koreksi Audit #5 & M-3]` + `[REQUIRES LEGAL REVIEW]`
 - `id UUID PRIMARY KEY DEFAULT gen_random_uuid()`
 - `hold_id UUID NOT NULL REFERENCES legal_vault.legal_preservation_holds(id) ON DELETE CASCADE`
-- `record_type TEXT NOT NULL CHECK (record_type IN ('user_account', 'post', 'comment', 'post_draft', 'report', 'ownership_link', 'moderation_action', 'moderation_appeal'))`
+- `record_type TEXT NOT NULL CHECK (record_type IN ('user_account', 'auth_identity', 'post', 'comment', 'post_draft', 'report', 'ownership_link', 'alias_ownership', 'bookmark', 'post_reaction', 'moderation_action', 'moderation_appeal'))` *(cakupan `auth_identity` untuk `auth.users.email` pada hold bertipe `'user'` ditandai `[REQUIRES LEGAL REVIEW]`)*
 - `source_record_id UUID NOT NULL`
 - `encryption_algorithm TEXT NOT NULL DEFAULT 'AES-256-GCM' CHECK (encryption_algorithm IN ('AES-256-GCM'))`
 - `key_id TEXT NOT NULL` *(identifier/versi Key Encryption Key di KMS eksternal)*
@@ -593,7 +610,7 @@ erDiagram
 - `purge_after TIMESTAMPTZ NOT NULL`
 - `created_at TIMESTAMPTZ NOT NULL DEFAULT now()`
 
-#### 23. `legal_vault.legal_access_logs` `[APPROVED BY FOUNDER]`
+#### 23. `legal_vault.legal_access_logs` `[APPROVED BY FOUNDER]` + `[TECHNICAL RECOMMENDATION — Koreksi Audit M-5]`
 - `seq_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY`
 - `hold_id UUID REFERENCES legal_vault.legal_preservation_holds(id) ON DELETE SET NULL`
 - `sensitive_request_id UUID REFERENCES private.sensitive_access_requests(id) ON DELETE SET NULL`
@@ -604,6 +621,7 @@ erDiagram
 - `prev_hash TEXT NOT NULL`
 - `entry_hash TEXT NOT NULL`
 - `created_at TIMESTAMPTZ NOT NULL DEFAULT now()`
+- **Serialisasi Rantai Hash:** Menggunakan helper internal `legal_vault.append_legal_access_log(...)` dengan `PERFORM pg_advisory_xact_lock(hashtext('unsaid_legal_access_chain'));` agar penulisan paralel tidak memecah rantai hash.
 
 ---
 
@@ -648,46 +666,47 @@ erDiagram
         - Klien browser (`anon` maupun pengguna `authenticated`) langsung ditolak PostgreSQL (`42501 permission denied for function`) bila mencoba memanggilnya lewat PostgREST.
         - **Catatan Opsi Lanjutan:** Untuk background worker atau Edge Function yang memakai koneksi TCP PostgreSQL langsung (`postgres.js` / `pg` via `DATABASE_URL` pooler), worker dapat memanggil `private.*` / `legal_vault.*` secara langsung tanpa memerlukan wrapper `public.rpc_worker_*`. Selama komunikasi server memakai `@supabase/supabase-js` (`PostgREST`), wrapper `GRANT EXECUTE TO service_role` menjadi gerbang resmi.
 
-### C. Interaksi `SECURITY DEFINER`, Kepemilikan Fungsi, `EXECUTE` Grants, RLS & `FORCE ROW LEVEL SECURITY`
+### C. Interaksi `SECURITY DEFINER`, Kepemilikan Fungsi, `EXECUTE` Grants, RLS & `FORCE ROW LEVEL SECURITY` `(Koreksi Audit C-1)`
 
 1. **Perilaku Riil `FORCE ROW LEVEL SECURITY` di PostgreSQL:**
-   - `ALTER TABLE ... ENABLE ROW LEVEL SECURITY` saja masih membiarkan **pemilik tabel (table owner)** melewati RLS.
+   - `ALTER TABLE ... ENABLE ROW LEVEL SECURITY` masih membiarkan **pemilik tabel (table owner)** melewati RLS.
    - `ALTER TABLE ... FORCE ROW LEVEL SECURITY` memaksa RLS tetap berlaku bagi **pemilik tabel**, **KECUALI** jika role yang mengeksekusi memiliki atribut **`SUPERUSER`** atau **`BYPASSRLS`**.
-   - Dalam proyek Supabase standar, role `postgres` (superuser) dan **`service_role` (`BYPASSRLS`)** **tetap melewati RLS** meskipun `FORCE ROW LEVEL SECURITY` aktif!
-2. **Konsekuensi Desain pada `SECURITY DEFINER`:**
-   - Fungsi `SECURITY DEFINER` berjalan dengan hak milik **pemilik fungsi (function owner)**, bukan pemanggil. Jika dimiliki oleh `postgres` (`SUPERUSER`/`BYPASSRLS`), fungsi tersebut melewati RLS di dalam tubuhnya.
-   - Karena itu, keamanan fungsi `SECURITY DEFINER` **tidak boleh** bersandar pada RLS semata; setiap fungsi `SECURITY DEFINER` wajib mematuhi 5 aturan ketat:
-     1. **Kepemilikan Fungsi Terkontrol:** Direkomendasikan membuat role non-superuser khusus tanpa `BYPASSRLS` (mis. `unsaid_app_definer` bila diizinkan oleh skrip migrasi Supabase) atau mengaudit ketat kepemilikan `postgres` dengan isolasi penuh.
-     2. **`SET search_path = ''`** wajib terpasang pada seluruh fungsi `SECURITY DEFINER` dengan referensi skema eksplisit (`public.*`, `private.*`, `legal_vault.*`).
-     3. **Validasi Pemanggil Eksplisit:**
-        - User wrappers wajib memeriksa `v_uid := auth.uid()` tidak NULL **dan** mengunci `private.user_accounts WHERE user_id = v_uid FOR SHARE` dengan `account_status = 'active'`.
-        - Staff wrappers wajib memeriksa `current_user = 'service_role'` (sebagai lapis kedua setelah `GRANT EXECUTE TO service_role`), memverifikasi `p_actor_user_id` di `private.staff_roles`, dan menulis audit log.
-     4. **Penegakan Scope Eksplisit di Dalam Query:** Seluruh `SELECT/UPDATE/DELETE` pada tabel `private.*` di dalam user wrapper wajib memakai predikat `WHERE owner_user_id = v_uid` / `WHERE user_id = v_uid` atau memeriksa `private.post_ownership` / `private.comment_ownership` / `private.alias_ownership`.
-     5. **`REVOKE/GRANT` Minimal:** Tidak ada satu pun fungsi sensitif yang memberi `EXECUTE` ke `PUBLIC` atau `anon`.
+   - Dalam proyek Supabase standar, role `postgres` dan **`service_role` (`BYPASSRLS`)** **selalu melewati RLS** meskipun `FORCE ROW LEVEL SECURITY` aktif.
+2. **Analisis Trade-off & Pemilihan Rancangan Konsisten untuk `SECURITY DEFINER`:**
+   - **Opsi A (Custom Role Non-`BYPASSRLS`, mis. `unsaid_app_definer`):** Fungsi `SECURITY DEFINER` dimiliki role non-`BYPASSRLS`. *Kelemahan & Risiko:* (1) Bila `private.*` memakai `FORCE ROW LEVEL SECURITY` tanpa policy permisif (`RLS: false`), **`unsaid_app_definer` sendiri akan tertolak (`42501`) dan seluruh RPC gagal di runtime**; (2) Pada Supabase Cloud managed, izin membuat role terpisah dengan kepemilikan objek lintas `auth.*`/`public.*` belum diverifikasi dan berisiko terbentur batasan hak role migrasi.
+   - **Opsi B — Dipilih sebagai Baseline MVP Supabase (`[TECHNICAL RECOMMENDATION]`):**
+     - Seluruh fungsi `SECURITY DEFINER` dimiliki oleh **role standar pemilik migrasi Supabase (`postgres`)**, kecuali jika saat pre-flight TASK 004B terbukti role `unsaid_app_definer` didukung penuh dan diberikan policy RLS eksplisit (`CREATE POLICY ... FOR ALL TO unsaid_app_definer USING (true) WITH CHECK (true)`).
+     - Seluruh 23 tabel mengaktifkan `ENABLE` + `FORCE ROW LEVEL SECURITY`, dengan kebijakan default **`DENY ALL` (`false`) bagi seluruh role non-`BYPASSRLS`** pada tabel-tabel `private.*` dan `legal_vault.*` (sehingga tidak ada role biasa maupun pemilik non-bypass mana pun yang bisa membaca `private.*`/`legal_vault.*` langsung).
+     - **Pengakuan Jujur Batas Perlindungan:** Karena `postgres` (`BYPASSRLS`) melewati RLS di dalam tubuh fungsi `SECURITY DEFINER`, **keamanan akses melalui RPC tidak bergantung pada RLS tabel `private.*`**, melainkan ditegakkan oleh 5 kontrol wajib berikut:
+       1. Skema `private` dan `legal_vault` tidak diekspos PostgREST + `REVOKE ALL ON SCHEMA ... FROM PUBLIC, anon, authenticated`.
+       2. `REVOKE ALL ON FUNCTION ... FROM PUBLIC, anon;` serta pemisahan mutlak `GRANT EXECUTE` antara `authenticated` (user lane) dan `service_role` (staff/worker lane).
+       3. `SET search_path = ''` pada setiap fungsi `SECURITY DEFINER` dengan nama objek berkualifikasi skema penuh.
+       4. Validasi pemanggil eksplisit di awal fungsi (`v_uid := auth.uid()` + kunci `private.user_accounts WHERE user_id = v_uid FOR SHARE` + `account_status = 'active'` untuk user lane; `current_user = 'service_role'` + `private.assert_staff_role(...)` untuk staff lane).
+       5. Filter kepemilikan eksplisit (`WHERE owner_user_id = v_uid` / `private.*_ownership`) di setiap query fungsi.
 
 ### D. Pencegahan Spoofing `user_id` & Otorisasi Staf Dua Lapis
 
-- **Anti-Spoofing `user_id` Pengguna:** Karena wrapper `authenticated` tidak mempunyai parameter `p_user_id` di tanda tangan fungsinya, klien tidak memiliki cara untuk menyuplai `user_id` orang lain lewat REST/RPC. Even jika attacker memanggil `/rest/v1/rpc/rpc_upsert_my_draft` secara langsung melewati Astro SSR dengan JWT valid miliknya, `auth.uid()` hanya akan mengizinkan akses ke draf milik dirinya sendiri dan tetap ditolak jika `account_status <> 'active'`.
+- **Anti-Spoofing `user_id` Pengguna:** Karena wrapper `authenticated` tidak mempunyai parameter `p_user_id` di tanda tangan fungsinya, klien tidak memiliki cara untuk menyuplai `user_id` orang lain lewat REST/RPC. Bahkan jika penyerang memanggil `/rest/v1/rpc/rpc_upsert_my_draft` secara langsung melewati Astro SSR dengan JWT valid miliknya, `auth.uid()` hanya akan mengizinkan akses ke draf milik dirinya sendiri dan tetap ditolak jika `account_status <> 'active'`.
 - **Otorisasi Staf Dua Lapis (Bukan Klaim JWT / Role DB Fiktif):**
   - PostgreSQL **tidak** otomatis mengenali tier staf seperti `moderator`, `operational_admin`, `privacy_legal_officer`, atau `super_admin_security` sebagai role PostgreSQL.
   - **Lapis 1 (Astro SSR):** Astro SSR memverifikasi JWT staf dengan `await userClient.auth.getUser()` -> mendapatkan `staffUser.id`. Astro SSR mengecek izin staf melalui `createServerAdminClient()` hanya pada operasi staf yang sah dan mengirim `p_actor_user_id = staffUser.id` ke `public.rpc_staff_*` / `public.rpc_legal_*`.
-  - **Lapis 2 (Di Dalam PostgreSQL):** Fungsi `private.assert_staff_role(p_actor_user_id UUID, p_allowed_roles TEXT[])` memeriksa tabel `private.staff_roles WHERE user_id = p_actor_user_id AND revoked_at IS NULL AND role = ANY(p_allowed_roles)`. Jika `private.user_accounts.account_status <> 'active'`, akses staf juga ditolak. Untuk operasi `legal_vault` dan `sensitive_access_requests`, SQL wajib memverifikasi persetujuan dua orang aktif (`approved_by IS NOT NULL AND approved_by <> requested_by AND status = 'approved' AND expires_at > now()`).
+  - **Lapis 2 (Di Dalam PostgreSQL):** Fungsi `private.assert_staff_role(p_actor_user_id UUID, p_allowed_roles TEXT[])` memeriksa tabel `private.staff_roles WHERE user_id = p_actor_user_id AND revoked_at IS NULL AND role = ANY(p_allowed_roles)` dan `private.user_accounts.account_status = 'active'`. Untuk operasi `legal_vault` dan `sensitive_access_requests`, SQL wajib memverifikasi persetujuan dua orang aktif (`approved_by IS NOT NULL AND approved_by <> requested_by AND status = 'approved' AND expires_at > now()`).
 
 ---
 
 ### E. Implementable Table-Level Security Matrix (Real PostgreSQL Roles)
 
-> **Catatan Role:** Hanya role PostgreSQL aktual (`anon`, `authenticated`, `service_role`) yang tercantum. `ENABLE` + `FORCE ROW LEVEL SECURITY` diaktifkan pada seluruh 23 tabel.
+> **Catatan Role:** Hanya role PostgreSQL aktual (`anon`, `authenticated`, `service_role`) yang tercantum. Seluruh 23 tabel memakai `ENABLE` + `FORCE ROW LEVEL SECURITY`. Pada `private.*` dan `legal_vault.*`, kebijakan RLS adalah `DENY ALL` (`false`) bagi role non-`BYPASSRLS`; akses resmi berjalan lewat `service_role` atau fungsi `SECURITY DEFINER` milik `postgres` yang terikat pada guard SQL di Bagian 5.C.
 
-| Tabel / View | Skema | `anon` (Grants & RLS Intent) | `authenticated` (Grants & RLS Intent) | `service_role` / Akses Internal |
+| Tabel / View | Skema | `anon` (Grants & RLS Intent) | `authenticated` (Grants & RLS Intent) | `service_role` / Akses via `SECURITY DEFINER` (`postgres`) |
 | :--- | :--- | :--- | :--- | :--- |
 | `categories` | `public` | `SELECT` only. RLS: `is_active = true`. | `SELECT` only. RLS: `is_active = true`. | `service_role` via `rpc_staff_manage_category` (`operational_admin` / `super_admin_security`). |
 | `aliases` | `public` | `SELECT` only (`true`). | `SELECT` only (`true`). No direct `INSERT/UPDATE/DELETE`. | Mutasi hanya via `public.rpc_claim_alias` & `public.rpc_release_own_alias` (`authenticated` JWT). |
-| `posts` | `public` | `SELECT` only. RLS: `moderation_status = 'visible'`. | `SELECT` only. RLS: `moderation_status = 'visible'`. No direct writes. | Tulis penulis via `rpc_publish_post`, `rpc_edit_own_post`, `rpc_delete_own_post` (`authenticated`). Moderasi via `rpc_staff_moderate_content` (`service_role` + `moderator`). |
-| `comments` | `public` | `SELECT` only. RLS: `moderation_status = 'visible'`. | `SELECT` only. RLS: `moderation_status = 'visible'`. No direct writes. | Tulis penulis via `rpc_create_comment`, `rpc_delete_own_comment` (`authenticated`). Moderasi via `rpc_staff_moderate_content` (`service_role` + `moderator`). |
+| `posts` | `public` | `SELECT` (disarankan mengecualikan `search_vector` via column-level `GRANT` bila didukung view). RLS: `moderation_status = 'visible'`. | `SELECT` (sama dengan `anon`). No direct writes. | Tulis penulis via `rpc_publish_post`, `rpc_edit_own_post`, `rpc_delete_own_post` (`authenticated`). Moderasi via `rpc_staff_moderate_content` (`service_role` + `moderator`). |
+| `comments` | `public` | `SELECT` only. RLS: `moderation_status = 'visible'`. *(Isi komentar terhapus ditimpa in-place oleh `rpc_delete_own_comment` — Koreksi M-1).* | `SELECT` only. RLS: `moderation_status = 'visible'`. No direct writes. | Tulis penulis via `rpc_create_comment`, `rpc_delete_own_comment` (`authenticated`). Moderasi via `rpc_staff_moderate_content` (`service_role` + `moderator`). |
 | `post_reaction_stats` | `public` | `SELECT` only (`true`). | `SELECT` only (`true`). No direct writes. | Diperbarui atomik oleh `rpc_toggle_post_appreciation` (`authenticated`) / `rpc_publish_post`. |
 | `public_posts_feed`, `public_post_detail`, `public_comments_view` | `public` (Views) | `SELECT` (`security_invoker=true, security_barrier=true`). | `SELECT` (`security_invoker=true, security_barrier=true`). | Mengikuti RLS `posts` & `comments` pemanggil. |
-| `user_accounts` | `private` | **NONE** (`REVOKE ALL`). RLS: `false`. | **NONE** (`REVOKE ALL`). RLS: `false` (tidak diekspos PostgREST). | Dibaca via `rpc_get_my_account_status` (`authenticated`), dikelola oleh worker/SSR (`service_role`). |
+| `user_accounts` | `private` | **NONE** (`REVOKE ALL`). RLS: `false`. | **NONE** (`REVOKE ALL`). RLS: `false` (tidak diekspos PostgREST). | Dibaca via `rpc_get_my_account_status` / `rpc_ensure_user_account` (`authenticated`), dibuat trigger `auth.users`, dikelola worker/SSR (`service_role`). |
 | `deletion_jobs` | `private` | **NONE**. RLS: `false`. | **NONE**. RLS: `false`. | Dibaca terbatas via `rpc_get_my_deletion_status` (`authenticated`); dijalankan oleh worker (`service_role`), dipantau non-PII oleh `operational_admin` / `super_admin_security`. |
 | `alias_ownership`, `post_ownership`, `comment_ownership` | `private` | **NONE**. RLS: `false`. | **NONE**. RLS: `false`. | Daftar milik sendiri via `rpc_list_my_*` (`authenticated`). Staf `moderator` & `operational_admin` **DILARANG** mengakses via wrapper mana pun. Akses insiden/hukum hanya dengan 2-person approval (`legal_vault` / `sensitive_access_requests`). |
 | `alias_quarantines` | `private` | **NONE**. RLS: `false`. | **NONE**. RLS: `false`. | Dicek & dibersihkan atomik di dalam `rpc_claim_alias` dan `rpc_release_own_alias` + purge worker (`service_role`). |
@@ -695,30 +714,34 @@ erDiagram
 | `bookmarks` | `private` | **NONE**. RLS: `false`. | **NONE**. RLS: `false` (dipindah dari `public`). | CRUD milik sendiri **hanya** melalui `rpc_list_my_bookmarks`, `rpc_toggle_bookmark` (`authenticated` JWT). |
 | `post_reactions` | `private` | **NONE**. RLS: `false`. | **NONE**. RLS: `false` (dipindah dari `public`). | Status & toggle **hanya** melalui `rpc_get_my_reaction_states`, `rpc_toggle_post_appreciation` (`authenticated` JWT). Dihapus oleh deletion worker (`service_role`) tanpa decrement count. |
 | `reports` | `private` | **NONE**. RLS: `false`. | **NONE**. RLS: `false`. | Pelapor kirim/lihat miliknya via `rpc_submit_report` / `rpc_list_my_reports` (`authenticated`). Moderator baca antrean ter-sanitasi tanpa `reporter_user_id` via `rpc_staff_list_moderation_queue` (`service_role`). |
-| `staff_roles` | `private` | **NONE**. RLS: `false`. | **NONE**. RLS: `false`. | Dikelola migrasi / `rpc_staff_manage_role` (`service_role` + `super_admin_security`, dua orang/audit log). |
+| `staff_roles` | `private` | **NONE**. RLS: `false`. | **NONE**. RLS: `false`. | Dikelola migrasi / `rpc_staff_manage_role` (`service_role` + `super_admin_security` + audit log). |
 | `sensitive_access_requests` | `private` | **NONE**. RLS: `false`. | **NONE**. RLS: `false`. | Diajukan/disetujui 2 pihak (`approved_by <> requested_by`) via `rpc_legal_manage_access_request` (`service_role`). |
-| `moderation_actions`, `moderation_appeals` | `private` | **NONE**. RLS: `false`. | **NONE**. RLS: `false`. | Pemilik lihat ringkasan & ajukan banding via `rpc_submit_appeal` / `rpc_list_my_post_moderation` (`authenticated`). Moderator putuskan via `rpc_staff_moderate_content` & `rpc_staff_resolve_appeal` (`service_role`) **tanpa** `appellant_user_id`. |
-| `moderation_audit_logs` | `private` | **NONE**. RLS: `false`. | **NONE**. RLS: `false`. | Append-only di dalam fungsi moderasi & `rpc_staff_list_audit_logs` (`service_role`; `REVOKE UPDATE, DELETE, TRUNCATE`). |
-| `legal_preservation_holds`, `legal_preservation_snapshots`, `legal_access_logs` | `legal_vault` | **NONE**. RLS: `false`. | **NONE**. RLS: `false`. | **Hanya** `service_role` melalui `rpc_legal_*` / deletion pre-snapshot worker setelah validasi `privacy_legal_officer` + two-person approval + external KEK. |
+| `moderation_actions`, `moderation_appeals` | `private` | **NONE**. RLS: `false`. | **NONE**. RLS: `false`. | Pemilik lihat ringkasan & ajukan banding via `rpc_submit_appeal` / `rpc_list_my_post_moderation` (`authenticated`). Moderator baca banding ter-sanitasi (`rpc_staff_list_appeals`) & putuskan (`rpc_staff_moderate_content`, `rpc_staff_resolve_appeal`) via `service_role` **tanpa** `appellant_user_id`. |
+| `moderation_audit_logs` | `private` | **NONE**. RLS: `false`. | **NONE**. RLS: `false`. | Append-only via `append_moderation_audit_log(...)` (`pg_advisory_xact_lock`) & dibaca via `rpc_staff_list_audit_logs` (`service_role`; `REVOKE UPDATE, DELETE, TRUNCATE`). |
+| `legal_preservation_holds`, `legal_preservation_snapshots`, `legal_access_logs` | `legal_vault` | **NONE**. RLS: `false`. | **NONE**. RLS: `false`. | **Hanya** `service_role` melalui `rpc_legal_*` (khusus `privacy_legal_officer` + two-person approval) & `rpc_worker_*` pre-unlink snapshot + external KMS KEK. |
 
 ---
 
-### F. Function-by-Function RPC Security & Staff Check Specification
+### F. Function-by-Function RPC Security & Staff Check Specification `(Koreksi Audit M-2, M-3, M-5)`
 
-| Nama Fungsi Wrapper (`public.*`) | Jalur Eksekusi | `GRANT EXECUTE` | `SECURITY DEFINER` & Search Path | Validasi Identitas & Otorisasi di Dalam SQL |
+| Nama Fungsi Wrapper (`public.*`) | Jalur Eksekusi | `GRANT EXECUTE` | `SECURITY DEFINER` & Owner | Validasi Identitas & Otorisasi di Dalam SQL |
 | :--- | :--- | :--- | :--- | :--- |
-| `rpc_list_my_drafts()`, `rpc_get_my_draft(id)`, `rpc_upsert_my_draft(...)`, `rpc_delete_my_draft(id)` | User JWT (via Astro SSR) | `authenticated` ONLY | `SECURITY DEFINER`, `SET search_path = ''` | `v_uid := auth.uid()` NOT NULL; lock `user_accounts FOR SHARE` (`active` untuk write); filter `owner_user_id = v_uid`. |
-| `rpc_list_my_bookmarks()`, `rpc_toggle_bookmark(post_id)` | User JWT | `authenticated` ONLY | `SECURITY DEFINER`, `SET search_path = ''` | `v_uid := auth.uid()`; `user_accounts FOR SHARE` (`active` saat toggle); filter `user_id = v_uid`. |
-| `rpc_get_my_reaction_states(post_ids)`, `rpc_toggle_post_appreciation(post_id)` | User JWT | `authenticated` ONLY | `SECURITY DEFINER`, `SET search_path = ''` | `v_uid := auth.uid()`; cek post `visible` & `account_status = 'active'` saat toggle; update atomik `post_reaction_stats`. |
-| `rpc_claim_alias(display_name)`, `rpc_release_own_alias(alias_id)`, `rpc_list_my_aliases()` | User JWT | `authenticated` ONLY | `SECURITY DEFINER`, `SET search_path = ''` | `v_uid := auth.uid()`; `pg_advisory_xact_lock`; cek `alias_quarantines`; cek `alias_ownership.owner_user_id = v_uid`; suppress `updated_at`. |
-| `rpc_publish_post(...)`, `rpc_edit_own_post(...)`, `rpc_delete_own_post(post_id)`, `rpc_list_my_posts()` | User JWT | `authenticated` ONLY | `SECURITY DEFINER`, `SET search_path = ''` | `v_uid := auth.uid()`; verifikasi `post_ownership.owner_user_id = v_uid` & `alias_ownership` jika `mode = 'alias'`. |
-| `rpc_create_comment(...)`, `rpc_delete_own_comment(comment_id)` | User JWT | `authenticated` ONLY | `SECURITY DEFINER`, `SET search_path = ''` | `v_uid := auth.uid()`; cek `comment_ownership.owner_user_id = v_uid` saat hapus (`is_deleted_by_author = true`). |
-| `rpc_submit_report(...)`, `rpc_submit_appeal(...)`, `rpc_get_my_account_status()`, `rpc_request_account_deletion(idempotency_key)` | User JWT | `authenticated` ONLY | `SECURITY DEFINER`, `SET search_path = ''` | `v_uid := auth.uid()`; untuk appeal cek `post_ownership`/`comment_ownership`; untuk deletion lock `user_accounts FOR UPDATE` (`active` -> `pending_deletion`). |
-| `rpc_staff_list_moderation_queue(p_actor_user_id, ...)` | Trusted SSR (`service_role`) | `service_role` ONLY | `SECURITY DEFINER`, `SET search_path = ''` | `current_user = 'service_role'`; `assert_staff_role(p_actor_user_id, ARRAY['moderator','super_admin_security'])`; mengembalikan **nol** `reporter_user_id`/`appellant_user_id`/`owner_user_id`. |
-| `rpc_staff_moderate_content(p_actor_user_id, ...)` & `rpc_staff_resolve_appeal(p_actor_user_id, ...)` | Trusted SSR (`service_role`) | `service_role` ONLY | `SECURITY DEFINER`, `SET search_path = ''` | `current_user = 'service_role'`; `assert_staff_role(..., ARRAY['moderator'])`; catat `moderation_actions` + hash-chained `moderation_audit_logs`. |
-| `rpc_staff_manage_category(p_actor_user_id, ...)` & `rpc_staff_get_ops_metrics(p_actor_user_id)` | Trusted SSR (`service_role`) | `service_role` ONLY | `SECURITY DEFINER`, `SET search_path = ''` | `current_user = 'service_role'`; `assert_staff_role(..., ARRAY['operational_admin','super_admin_security'])`; agregat non-PII saja. |
-| `rpc_legal_manage_hold(p_actor_user_id, ...)` & `rpc_legal_access_snapshot(p_actor_user_id, p_request_id, ...)` | Trusted SSR (`service_role`) | `service_role` ONLY | `SECURITY DEFINER`, `SET search_path = ''` | `current_user = 'service_role'`; `assert_staff_role(..., ARRAY['privacy_legal_officer','super_admin_security'])`; wajib 2-person approval (`approved_by <> requested_by`) + catat `legal_access_logs`. |
-| `rpc_worker_claim_deletion_jobs(...)`, `rpc_worker_execute_db_unlink(...)`, `rpc_worker_mark_deletion_state(...)`, `rpc_worker_purge_expired_data()` | Trusted Worker (`service_role`) | `service_role` ONLY | `SECURITY DEFINER`, `SET search_path = ''` | `current_user = 'service_role'`; idempoten dengan `FOR UPDATE SKIP LOCKED`; memeriksa kecocokan snapshot legal hold aktif sebelum unlink. |
+| `rpc_ensure_user_account()` | User JWT (SSR Auth Callback) | `authenticated` ONLY | `SECURITY DEFINER`, `postgres`, `SET search_path = ''` | `v_uid := auth.uid()` NOT NULL; tolak jika ada `deletion_jobs` aktif; insert `(v_uid, 'active')` `ON CONFLICT DO NOTHING`. |
+| `rpc_list_my_drafts()`, `rpc_get_my_draft(id)`, `rpc_upsert_my_draft(...)`, `rpc_delete_my_draft(id)` | User JWT (via Astro SSR) | `authenticated` ONLY | `SECURITY DEFINER`, `postgres`, `SET search_path = ''` | `v_uid := auth.uid()` NOT NULL; lock `user_accounts FOR SHARE` (`active` untuk write); filter `owner_user_id = v_uid`. |
+| `rpc_list_my_bookmarks()`, `rpc_toggle_bookmark(post_id)` | User JWT | `authenticated` ONLY | `SECURITY DEFINER`, `postgres`, `SET search_path = ''` | `v_uid := auth.uid()`; `user_accounts FOR SHARE` (`active` saat toggle); filter `user_id = v_uid`. |
+| `rpc_get_my_reaction_states(post_ids)`, `rpc_toggle_post_appreciation(post_id)` | User JWT | `authenticated` ONLY | `SECURITY DEFINER`, `postgres`, `SET search_path = ''` | `v_uid := auth.uid()`; cek post `visible` & `account_status = 'active'` saat toggle; update atomik `retained_appreciation_count`. |
+| `rpc_claim_alias(display_name)`, `rpc_release_own_alias(alias_id)`, `rpc_list_my_aliases()` | User JWT | `authenticated` ONLY | `SECURITY DEFINER`, `postgres`, `SET search_path = ''` | `v_uid := auth.uid()`; `pg_advisory_xact_lock`; cek `alias_quarantines`; cek `alias_ownership.owner_user_id = v_uid`; suppress `updated_at`. |
+| `rpc_publish_post(...)`, `rpc_edit_own_post(...)`, `rpc_delete_own_post(post_id)`, `rpc_list_my_posts()` | User JWT | `authenticated` ONLY | `SECURITY DEFINER`, `postgres`, `SET search_path = ''` | `v_uid := auth.uid()`; verifikasi `post_ownership.owner_user_id = v_uid` & `alias_ownership` jika `mode = 'alias'`. |
+| `rpc_create_comment(...)`, `rpc_delete_own_comment(comment_id)` | User JWT | `authenticated` ONLY | `SECURITY DEFINER`, `postgres`, `SET search_path = ''` | `v_uid := auth.uid()`; cek `comment_ownership.owner_user_id = v_uid`; cek hold aktif sebelum menimpa `body_markdown` + `is_deleted_by_author = true`. |
+| `rpc_submit_report(...)`, `rpc_list_my_reports()`, `rpc_submit_appeal(...)`, `rpc_list_my_post_moderation()` | User JWT | `authenticated` ONLY | `SECURITY DEFINER`, `postgres`, `SET search_path = ''` | `v_uid := auth.uid()`; verifikasi `post_ownership`/`comment_ownership` pada appeal; filter `reporter_user_id = v_uid`. |
+| `rpc_get_my_account_status()`, `rpc_get_my_deletion_status()`, `rpc_request_account_deletion(idempotency_key)` | User JWT | `authenticated` ONLY | `SECURITY DEFINER`, `postgres`, `SET search_path = ''` | `v_uid := auth.uid()`; lock `user_accounts FOR UPDATE` (`active` -> `pending_deletion`); buat `deletion_jobs` idempoten. |
+| `rpc_staff_list_moderation_queue(p_actor_user_id, ...)` & `rpc_staff_list_appeals(p_actor_user_id, ...)` | Trusted SSR (`service_role`) | `service_role` ONLY | `SECURITY DEFINER`, `postgres`, `SET search_path = ''` | `current_user = 'service_role'`; `assert_staff_role(p_actor_user_id, ARRAY['moderator'])`; mengembalikan **nol** `reporter_user_id`, `appellant_user_id`, atau `*_ownership`. |
+| `rpc_staff_moderate_content(p_actor_user_id, ...)` & `rpc_staff_resolve_appeal(p_actor_user_id, ...)` | Trusted SSR (`service_role`) | `service_role` ONLY | `SECURITY DEFINER`, `postgres`, `SET search_path = ''` | `current_user = 'service_role'`; `assert_staff_role(..., ARRAY['moderator'])`; catat `moderation_actions` + `append_moderation_audit_log(...)`. |
+| `rpc_staff_manage_category(p_actor_user_id, ...)` & `rpc_staff_get_ops_metrics(p_actor_user_id)` | Trusted SSR (`service_role`) | `service_role` ONLY | `SECURITY DEFINER`, `postgres`, `SET search_path = ''` | `current_user = 'service_role'`; `assert_staff_role(..., ARRAY['operational_admin','super_admin_security'])`; agregat non-PII & status teknis job saja. |
+| `rpc_staff_list_audit_logs(p_actor_user_id, ...)` & `rpc_staff_manage_role(p_actor_user_id, ...)` | Trusted SSR (`service_role`) | `service_role` ONLY | `SECURITY DEFINER`, `postgres`, `SET search_path = ''` | `current_user = 'service_role'`; `list_audit_logs` memfilter scope per tier staf; `manage_role` khusus `super_admin_security` + wajib tulis audit log. |
+| `rpc_legal_manage_hold(p_actor_user_id, ...)` & `rpc_legal_manage_access_request(p_actor_user_id, ...)` | Trusted SSR (`service_role`) | `service_role` ONLY | `SECURITY DEFINER`, `postgres`, `SET search_path = ''` | `current_user = 'service_role'`; pengajuan/pengelolaan hold oleh `privacy_legal_officer`; co-approval (`approved_by <> requested_by`) oleh `privacy_legal_officer` ke-2 atau `super_admin_security`; catat `append_legal_access_log(...)`. |
+| `rpc_legal_access_snapshot(p_actor_user_id, p_request_id, ...)` | Trusted SSR (`service_role`) | `service_role` ONLY | `SECURITY DEFINER`, `postgres`, `SET search_path = ''` | `current_user = 'service_role'`; **`assert_staff_role(..., ARRAY['privacy_legal_officer'])` ONLY** (atau insiden kritis darurat via alur Request terpisah yang disetujui 2 pihak); wajib `sensitive_access_requests` `approved`, `approved_by <> requested_by`, `expires_at > now()`; catat `append_legal_access_log(...)`. |
+| `rpc_worker_claim_deletion_jobs(...)`, `rpc_worker_get_active_holds_for_user(p_user_id)`, `rpc_worker_store_legal_snapshot(...)`, `rpc_worker_execute_db_unlink(...)`, `rpc_worker_mark_deletion_state(...)`, `rpc_worker_purge_expired_data()` | Trusted Worker (`service_role`) | `service_role` ONLY | `SECURITY DEFINER`, `postgres`, `SET search_path = ''` | `current_user = 'service_role'`; `FOR UPDATE SKIP LOCKED`; `execute_db_unlink` memverifikasi kelengkapan snapshot untuk seluruh hold aktif lintas `user`/`post`/`comment`/`report` sebelum unlink. |
 
 ---
 
@@ -780,22 +803,28 @@ Saat pengguna aktif melepas salah satu alias melalui Astro SSR (`userClient`) ->
 
 ## 8. Account Deletion State Machine, Failure Semantics & Recovery `[APPROVED BY FOUNDER]`
 
-> **Koreksi Audit #3:** Memperkuat definisi setiap transisi kegagalan dan pemulihan pada alur `requested → auth_session_revoked → db_unlinked → auth_deleted → completed`, serta membedakan secara tegas antara pencabutan sesi dengan pemblokiran/penghapusan permanen Auth.
+> **Koreksi Audit #3 & C-2:** Memperbaiki pemakaian `supabase.auth.admin.signOut(jwt, 'global')` (bukan `user_id`), menetapkan mekanisme fallback ketika worker tidak memegang `jwt`, serta merinci pemulihan pra-`db_unlinked`, penguncian paralel, dan intervensi manual pasca-`db_unlinked`.
 
 ```text
   [requested]
-       │  (user_accounts.account_status = 'pending_deletion', writes locked via FOR SHARE)
-       ▼  Step 1: auth.admin.signOut(user_id, 'global')  [Hanya cabut sesi; JANGAN ban/hapus Auth]
+       │  (rpc_request_account_deletion: user_accounts.account_status = 'pending_deletion' via FOR UPDATE;
+       │   seluruh RPC privat/tulis langsung ditolak via FOR SHARE)
+       ▼  Step 1 (Sync di Astro SSR yang memegang userAccessToken):
+       │  auth.admin.signOut(userAccessToken, 'global')  [Hanya cabut sesi; JANGAN ban/hapus Auth]
+       │  (Fallback bila signOut(jwt) gagal/kedaluwarsa: tetap lanjut ke Step 2 dengan proteksi aktif
+       │   dari account_status = 'pending_deletion' + SSR getUser() gate; JANGAN panggil signOut(user_id))
   [auth_session_revoked]  (checkpoint = 'auth_session_revoked')
        │
-       ├──► (Step 2 gagal DB transient/timeout -> FULL ROLLBACK, tidak ada unlink parsial)
+       ├──► (Step 2 gagal DB transient/timeout/SNAPSHOT_REQUIRED -> FULL ROLLBACK, nol unlink parsial)
        │         └──► [failed_retryable] (checkpoint tetap 'auth_session_revoked')
-       │                   ├──► Worker retry / User re-login OTP via Recovery Screen ──► Step 2
+       │                   ├──► Worker retry (buat snapshot legal_vault jika ada hold -> ulang Step 2)
+       │                   ├──► User re-login OTP via Recovery Screen ──► picu ulang Step 2
        │                   └──► Batas retry habis ──► [failed_manual_intervention] (account_status = 'deletion_failed')
        │
-       ▼  Step 2: Pre-check hold -> (Jika hold aktif: worker enkripsi & simpan snapshot ke legal_vault)
-       │          -> ACID PostgreSQL unlink (anonymize alias posts, quarantine aliases 30d,
-       │             hapus private.*_ownership, post_drafts, bookmarks, post_reactions, null reporter/appellant)
+       ▼  Step 2: Cek hold aktif lintas user/post/comment/report -> (jika ada: worker enkripsi AEAD ke legal_vault)
+       │          -> ACID PostgreSQL unlink (verifikasi snapshot hold lengkap -> anonymize alias posts [suppress updated_at],
+       │             quarantine aliases 30d, hapus private.*_ownership, post_drafts, bookmarks, post_reactions,
+       │             null reporter_user_id, redaksi appeal_statement + is_redacted_by_deletion = true)
   [db_unlinked]  (checkpoint = 'db_unlinked' — POINT OF NO RETURN; tidak pernah di-rollback)
        │
        ▼  Step 3: auth.admin.deleteUser(user_id)  (atau anggap sukses jika 404 User Not Found)
@@ -810,16 +839,19 @@ Saat pengguna aktif melepas salah satu alias melalui Astro SSR (`userClient`) ->
                                                                      DILARANG memulihkan link kepemilikan)
 ```
 
-### A. Perbedaan Pencabutan Sesi vs. Ban/Penghapusan Auth Permanen
-- **Pencabutan Sesi (`auth.admin.signOut(user_id, 'global')`):** Hanya membatalkan refresh token dan sesi aktif agar permintaan baru dari perangkat lain berhenti. Baris `auth.users` dan metode Email OTP belum dihapus dan **tidak diberi ban permanen** sebelum `db_unlinked`.
-- **Ban / Penghapusan Auth Permanen (`auth.admin.deleteUser(user_id)`):** Operasi destruktif di luar transaksi PostgreSQL. Karena tidak bisa di-rollback apabila DB gagal, pemanggilannya **ditahan ketat hingga setelah checkpoint `db_unlinked` berhasil di-commit**.
+### A. Perbedaan Pencabutan Sesi, Kunci Status DB, dan Penghapusan Auth Permanen (`Koreksi Audit C-2`)
+- **Tanda Tangan API Terverifikasi:** Metode admin Supabase JS adalah `supabase.auth.admin.signOut(jwt, scope)` yang **mewajibkan access token `jwt` aktif milik pengguna**, bukan `user_id` UUID.
+- **Mekanisme Fallback Pencabutan Sesi (`[TECHNICAL RECOMMENDATION]`):**
+  - *Trade-off:* Menggunakan `signOut(jwt, 'global')` langsung pada Astro SSR bekerja seketika ketika `userAccessToken` tersedia di cookie permintaan. Namun, pada background retry worker asinkron, server tidak menyimpan `jwt` plaintext pengguna (demi keamanan).
+  - *Solusi Terpilih:* (1) Astro SSR mengeksekusi `auth.admin.signOut(userAccessToken, 'global')` segera secara sinkron setelah `account_status` berubah menjadi `'pending_deletion'`; (2) Apabila pemanggilan `signOut(jwt)` gagal atau timeout, **kontrol penguncian utama tetap dijamin oleh `private.user_accounts.account_status = 'pending_deletion'`** (setiap RPC menolak `account_status <> 'active'` dan setiap halaman privat SSR memeriksa status tersebut), sehingga token lama di perangkat mana pun tidak dapat melakukan mutasi atau membaca data privat sampai `auth.admin.deleteUser(user_id)` menuntaskan pencabutan akun di Auth; (3) Opsi lanjutan penghapusan paksa baris `auth.sessions`/`auth.refresh_tokens` via fungsi admin SQL ditandai sebagai item verifikasi proyek Supabase live sebelum diterapkan.
+- **Ban / Penghapusan Auth Permanen (`auth.admin.deleteUser(user_id)`):** Operasi destruktif di luar transaksi PostgreSQL. Pemanggilannya **ditahan ketat hingga setelah checkpoint `db_unlinked` berhasil di-commit**.
 
 ### B. Penanganan Spesifik Setiap Kasus Kegagalan & Pemulihan
-1. **Jika Pencabutan Sesi Berhasil (`auth_session_revoked`), Namun Transaksi DB (`db_unlinked`) Gagal:**
-   - Seluruh mutasi di `execute_account_deletion_db` mengalami **`ROLLBACK` penuh** di PostgreSQL. Tidak ada sebagian draf yang terhapus atau sebagian alias yang terlepas.
+1. **Jika Pencabutan Sesi / Inisiasi Berhasil (`auth_session_revoked`), Namun Transaksi DB (`db_unlinked`) Gagal:**
+   - Seluruh mutasi di `rpc_worker_execute_db_unlink` mengalami **`ROLLBACK` penuh** di PostgreSQL. Tidak ada sebagian draf yang terhapus atau sebagian alias yang terlepas.
    - `private.deletion_jobs` mencatat `state = 'failed_retryable'` (atau `'failed_manual_intervention'` jika fatal/habis kuota percobaan) dengan `last_reached_checkpoint = 'auth_session_revoked'`.
-   - **Cara Worker Melanjutkan:** Background worker memilih baris dengan `FOR UPDATE SKIP LOCKED` saat `next_retry_at <= now()`, memeriksa `last_reached_checkpoint`, dan langsung mengulang Step 2 (`execute_account_deletion_db`) secara idempoten.
-   - **Cara Pengguna Melanjutkan Secara Aman:** Karena akun Auth belum dihapus atau di-ban permanen, jika pengguna meminta Email OTP baru sebelum `db_unlinked`, Astro SSR mendeteksi `account_status IN ('pending_deletion', 'deletion_failed')` dengan `last_reached_checkpoint <> 'db_unlinked'`. SSR **menolak seluruh akses workspace/penulisan** dan menampilkan **Halaman Status & Pemulihan Penghapusan Akun** di mana pengguna dapat menekan **"Lanjutkan Penghapusan Akun"** (memicu ulang `deletion_jobs` yang sama secara aman tanpa membuat duplikat job).
+   - **Cara Worker Melanjutkan:** Background worker memilih baris dengan `FOR UPDATE SKIP LOCKED` saat `next_retry_at <= now()`, memeriksa apakah ada hold aktif baru (`rpc_worker_get_active_holds_for_user`), membuat snapshot terenkripsi jika diperlukan, dan mengulang Step 2 secara idempoten.
+   - **Cara Pengguna Melanjutkan Secara Aman:** Karena `auth.users` belum dihapus atau di-ban permanen, jika pengguna meminta Email OTP baru sebelum `db_unlinked`, Astro SSR mendeteksi `account_status IN ('pending_deletion', 'deletion_failed')` dengan `last_reached_checkpoint <> 'db_unlinked'`. SSR **menolak seluruh akses workspace/penulisan** dan menampilkan **Halaman Status & Pemulihan Penghapusan Akun** di mana pengguna dapat menekan **"Lanjutkan Penghapusan Akun"** (memicu ulang `deletion_jobs` yang sama secara aman tanpa membuat duplikat job).
 2. **Cara Pemblokiran Permintaan & Penulisan Paralel (`Concurrency Guard`):**
    - Segera saat `rpc_request_account_deletion` berjalan, fungsi mengunci baris `private.user_accounts WHERE user_id = v_uid FOR UPDATE` dan mengubah `account_status = 'pending_deletion'`.
    - **Seluruh** RPC penulisan pengguna (`post_drafts`, `claim_alias`, `release_alias`, `publish_post`, `edit_post`, `delete_post`, `comments`, `bookmarks`, `post_reactions`, `reports`, `appeals`) di awal transaksinya mengunci `private.user_accounts WHERE user_id = v_uid FOR SHARE` dan memvalidasi `account_status = 'active'`.
@@ -827,11 +859,11 @@ Saat pengguna aktif melepas salah satu alias melalui Astro SSR (`userClient`) ->
 3. **Jaminan Idempotensi Saat Retry:**
    - Partial unique index `uq_deletion_jobs_active_user ON private.deletion_jobs (user_id) WHERE state <> 'completed'` mencegah job ganda.
    - `rpc_worker_execute_db_unlink` memeriksa `last_reached_checkpoint`: bila sudah `'db_unlinked'` atau lebih lanjut, ia mengembalikan status sukses (`already_unlinked = true`) tanpa menjalankan ulang operasi unlink.
-   - Seluruh mutasi di dalam transaksi DB aman bila dieksekusi ulang pada state `auth_session_revoked` (hanya memproses baris yang belum null/terhapus), dan Step 3 menganggap HTTP `404 User not found` dari `auth.admin.deleteUser` sebagai sukses menuju `auth_deleted → completed`.
+   - Seluruh mutasi di dalam transaksi DB aman bila dieksekusi ulang pada state `auth_session_revoked` (hanya memproses baris yang belum null/terhapus), termasuk meredaksi `moderation_appeals` dengan teks >= 10 karakter (`is_redacted_by_deletion = TRUE`), dan Step 3 menganggap HTTP `404 User not found` dari `auth.admin.deleteUser` sebagai sukses menuju `auth_deleted → completed`.
 4. **Jika Penghapusan Supabase Auth (`auth.admin.deleteUser`) Berulang Kali Gagal Setelah `db_unlinked`:**
    - Kepemilikan, draf, bookmark, reaksi, dan data pribadi di PostgreSQL sudah terputus permanen (`last_reached_checkpoint = 'db_unlinked'`).
    - Worker melakukan retry terjadwal (`failed_retryable`) dengan *exponential backoff*.
-   - Jika pengguna mencoba masuk ulang lewat OTP saat jeda retry pasca-`db_unlinked`, Astro SSR melihat `last_reached_checkpoint = 'db_unlinked'`, **memblokir total sesi tersebut** (`410 ACCOUNT_UNLINKED_FINALIZING_DELETION`), mencabut sesi seketika, dan langsung memicu eksekusi `auth.admin.deleteUser(user_id)` saat itu juga.
+   - Jika pengguna mencoba masuk ulang lewat OTP saat jeda retry pasca-`db_unlinked`, Astro SSR melihat `last_reached_checkpoint = 'db_unlinked'`, **memblokir total sesi tersebut** (`410 ACCOUNT_UNLINKED_FINALIZING_DELETION`), mencabut sesi seketika dengan `signOut(newSessionAccessToken, 'global')`, dan langsung memicu eksekusi `auth.admin.deleteUser(user_id)`.
    - Bila batas maksimum percobaan habis (`failed_manual_intervention`), status `user_accounts.account_status` disetel ke `'deletion_failed'` dan alert dikirim ke `super_admin_security` / `operational_admin`.
 5. **Cara Kerja Intervensi Manual Tanpa Memulihkan Tautan Kepemilikan:**
    - **Aturan Mutlak:** Setelah `db_unlinked` ter-commit, tautan privat (`post_ownership`, `comment_ownership`, `alias_ownership`) telah terhapus permanen dan **dilarang keras** direkonstruksi atau dipulihkan kembali.
@@ -866,14 +898,19 @@ Tier staf didefinisikan sebagai aplikasi RBAC di `private.staff_roles` dan diteg
      - Mengenkripsi payload JSON kanonik dalam scope hold menggunakan `AES-256-GCM` -> menghasilkan `encrypted_payload (BYTEA)` dan `auth_tag (BYTEA)`.
      - Membungkus (*wrap*) DEK dengan **Key Encryption Key (KEK)** eksternal menggunakan **Cloud KMS / HSM** (atau secret terisolasi `LEGAL_VAULT_KEK` di luar cluster database PostgreSQL) -> menyimpan hanya `wrapped_dek (BYTEA)` dan `key_id` di tabel database.
    - **Pemisahan Kepercayaan:** KEK **tidak pernah** disimpan di tabel PostgreSQL maupun di dalam `SUPABASE_SERVICE_ROLE_KEY`. Dengan demikian, dump database mentah, backup WAL, maupun kompromi kredensial DB read-only tidak dapat mendekripsi payload snapshot tanpa akses ke KMS eksternal.
-3. **Alur Pembuatan Snapshot Saat Penghapusan Akun (`Pre-Unlink Server Snapshot`):**
-   - Setelah `account_status = 'pending_deletion'` mengunci penulisan baru dan sebelum `rpc_worker_execute_db_unlink` berjalan, orchestrator/worker tepercaya mengecek `legal_vault.legal_preservation_holds WHERE status = 'active' AND expires_at > now()` yang relevan dengan `user_id` atau tulisan/komentar/laporan miliknya.
+3. **Alur Pembuatan & Verifikasi Hold Lintas Entitas (`Pre-Unlink Server Snapshot` — Koreksi Audit M-3):**
+   - Setelah `account_status = 'pending_deletion'` mengunci penulisan baru dan sebelum `rpc_worker_execute_db_unlink` berjalan, orchestrator/worker tepercaya memanggil `rpc_worker_get_active_holds_for_user(p_user_id)` yang mendeteksi seluruh `legal_vault.legal_preservation_holds WHERE status = 'active' AND expires_at > now()` terkait:
+     - `('user', p_user_id)`, **ATAU**
+     - `('post', po.post_id)` milik `p_user_id`, **ATAU**
+     - `('comment', co.comment_id)` milik `p_user_id`, **ATAU**
+     - `('report', r.id)` milik `p_user_id`.
    - Jika tidak ada hold aktif: langsung lanjut ke `db_unlinked` tanpa membuat snapshot apa pun.
-   - Jika ada hold aktif: worker membaca **hanya** record di dalam scope hold, mengenkripsinya di memori dengan KMS + AES-256-GCM, menyimpannya ke `legal_vault.legal_preservation_snapshots` (`purge_after = hold.expires_at`), lalu menjalankan `rpc_worker_execute_db_unlink` (yang memverifikasi snapshot untuk hold aktif tersebut sudah tersimpan sebelum menghapus data operasional di luar scope hold).
-4. **Akses Terbatas, Audit, Kedaluwarsa & Penghapusan (*Crypto-Shredding + Auto-Purge*):**
-   - Dekripsi snapshot hanya dapat dipicu melalui endpoint `legal_vault` terotorisasi oleh `privacy_legal_officer` setelah validasi `sensitive_access_requests` dengan **two-person approval** (`approved_by <> requested_by`), `status = 'approved'`, dan `expires_at > now()`.
-   - Setiap pembuatan, pembacaan/dekripsi, pelepasan hold, maupun purge snapshot wajib mencatat entri berantai hash di `legal_vault.legal_access_logs`.
-   - Saat `expires_at` lewat atau hold berstatus `'released'`, job pembersih (`rpc_worker_purge_expired_data`) menghapus baris di `legal_preservation_snapshots` (menghancurkan `wrapped_dek` dan `encrypted_payload` secara permanen) dan mencatat bukti pemusnahan di `legal_access_logs`.
+   - Jika ada hold aktif: worker membaca **hanya** record di dalam scope hold, mengenkripsinya di memori dengan KMS + AES-256-GCM, menyimpannya via `rpc_worker_store_legal_snapshot(...)` (`purge_after = hold.expires_at`), lalu menjalankan `rpc_worker_execute_db_unlink`. Di dalam transaksi `rpc_worker_execute_db_unlink`, SQL memeriksa ulang apakah ada hold aktif (termasuk yang baru disetujui setelah snapshot worker dimulai) yang belum memiliki snapshot terbaru; bila ditemukan celah *TOCTOU*, transaksi membatalkan unlink dan mengembalikan `SNAPSHOT_REQUIRED` agar worker melengkapi snapshot terenkripsi terlebih dahulu.
+   - *(Catatan `[REQUIRES LEGAL REVIEW]`: Penyertaan `auth_identity` / `auth.users.email` ke dalam snapshot pada hold bertipe `'user'` sebelum `auth.admin.deleteUser(user_id)` wajib dikonfirmasi oleh tinjauan hukum.)*
+4. **Akses Terbatas, Audit, Perpanjangan, Kedaluwarsa & Penghapusan (*Crypto-Shredding + Auto-Purge*):**
+   - Dekripsi snapshot hanya dapat dipicu melalui endpoint `legal_vault` terotorisasi oleh `privacy_legal_officer` setelah validasi `sensitive_access_requests` dengan **two-person approval** (`approved_by <> requested_by`), `status = 'approved'`, dan `expires_at > now()`. (`super_admin_security` dapat bertindak sebagai *co-approver* namun tidak mengakses/mendekripsi snapshot hold hukum secara sepihak.)
+   - Setiap pembuatan, pembacaan/dekripsi, perpanjangan, pelepasan hold, maupun purge snapshot wajib mencatat entri berantai hash melalui `append_legal_access_log(...)`.
+   - Jika hold diperpanjang secara sah, `purge_after` pada seluruh snapshot terkait ikut disinkronkan secara atomik. Saat `expires_at` lewat (status berubah ke `'expired'`) atau hold berstatus `'released'`, job pembersih (`rpc_worker_purge_expired_data`) menghapus baris di `legal_preservation_snapshots` (menghancurkan `wrapped_dek` dan `encrypted_payload` secara permanen) dan mencatat bukti pemusnahan di `legal_access_logs`.
 
 ### B. Kategori Retensi Data (`[APPROVED BY FOUNDER]` + `[REQUIRES LEGAL REVIEW]`)
 
@@ -882,7 +919,7 @@ Tier staf didefinisikan sebagai aplikasi RBAC di `private.staff_roles` dan diteg
 | **Akun, draf (`private.post_drafts`), bookmark (`private.bookmarks`), `post_reactions`, kepemilikan (`*_ownership`)** | Dihapus permanen saat `db_unlinked` (kecuali scope spesifik yang memiliki hold hukum aktif). | Selama akun aktif; kebijakan retensi akun tidak aktif jangka panjang memerlukan tinjauan UU PDP. |
 | **Karantina alias (`private.alias_quarantines`)** | Masuk karantina 30 hari tanpa `former_owner_user_id`. | **30 hari (`[APPROVED BY FOUNDER]`)**, kemudian auto-purge saat `quarantined_until <= now()`. |
 | **Laporan (`private.reports`)** | `reporter_user_id` diubah menjadi `NULL`. | Retensi terbatas pasca-penutupan kasus (mis. 90–180 hari untuk laporan `dismissed`, atau lebih terukur untuk laporan keselamatan berat — finalisasi via Legal Review). |
-| **Tindakan moderasi & banding (`private.moderation_*`)** | `appellant_user_id` di-NULL-kan dan pernyataan banding pribadi dibersihkan. | Retensi terdefinisi untuk akuntabilitas moderasi tanpa PII akun terhapus. |
+| **Tindakan moderasi & banding (`private.moderation_*`)** | `appellant_user_id` di-NULL-kan, `is_redacted_by_deletion = TRUE`, dan `appeal_statement` diganti teks redaksi >= 10 karakter. | Retensi terdefinisi untuk akuntabilitas moderasi tanpa PII akun terhapus. |
 | **Audit log & `deletion_jobs`** | Tanpa email/PII penulis; hanya ID tugas/audit teknis. | Retensi terdefinisi (mis. 1–2 tahun untuk audit keamanan/UU PDP — finalisasi via Legal Review). |
 | **Snapshot preservasi (`legal_vault`)** | Terenkripsi AEAD hanya untuk scope hold aktif. | Terbatas ketat hingga `purge_after = hold.expires_at` / `released_at`; dilarang retensi permanen tanpa dasar hukum aktif. |
 
@@ -895,10 +932,11 @@ Tier staf didefinisikan sebagai aplikasi RBAC di `private.staff_roles` dan diteg
 1. **Metode Login Utama MVP — Email OTP `[APPROVED BY FOUNDER]`:**
    - Menggunakan `supabase.auth.signInWithOtp({ email, options: { shouldCreateUser: true } })` dan `supabase.auth.verifyOtp({ email, token, type: 'email' })` via `@supabase/ssr`.
    - **`[TECHNICAL RECOMMENDATION]`:** Gunakan kode OTP 6-digit sebagai alur utama agar kebal terhadap pemindai tautan email otomatis dan berfungsi di browser in-app seluler.
-   - Email tetap berada di Supabase Auth (`auth.users`) dan tidak pernah disalin ke tabel `public.*`.
+   - Email tetap berada di Supabase Auth (`auth.users`) dan tidak pernah disalin ke tabel `public.*` (kecuali snapshot terenkripsi bila diwajibkan oleh hold hukum sah bertipe `'user'` setelah legal review).
+   - Saat callback login sukses, trigger `auth.users` / `rpc_ensure_user_account()` memastikan `private.user_accounts` siap tanpa membuka celah re-kreasi saat `deletion_jobs` aktif.
 2. **Metode Tambahan Opsional — Passkeys (WebAuthn) `[APPROVED BY FOUNDER]`:**
    - `@supabase/auth-js@2.119.2` menyediakan API klien native (`registerPasskey()`, `signInWithPasskey()`, `auth.passkey.*`), namun **server Passkeys Supabase berstatus Beta** dan memerlukan konfigurasi aktif pada proyek Supabase target (`GOTRUE_PASSKEY_ENABLED=true`, `RP ID`, `RP Origins`).
-   - **`[TECHNICAL RECOMMENDATION]`:** Enrollment Passkey hanya tersedia setelah pengguna masuk dengan sesi Email OTP terverifikasi; pencabutan Passkey (`auth.passkey.delete`) aman karena Email OTP tetap berfungsi sebagai jalur fallback/recovery apabila perangkat hilang atau WebAuthn diblokir iframe/WebView (`Permissions-Policy`).
+   - **`[TECHNICAL RECOMMENDATION]`:** Rilis MVP tetap dirancang agar **dapat berjalan penuh hanya dengan Email OTP** di balik *feature flag* (`PUBLIC_ENABLE_PASSKEYS`) apabila Passkeys Beta belum stabil pada proyek target atau dibatasi oleh `Permissions-Policy` di environment iframe/WebView. Enrollment Passkey hanya tersedia setelah sesi Email OTP terverifikasi, dan pencabutannya aman karena Email OTP tetap menjadi jalur pemulihan utama.
 
 ---
 
@@ -907,12 +945,13 @@ Tier staf didefinisikan sebagai aplikasi RBAC di `private.staff_roles` dan diteg
 | Risiko / Vektor Ancaman | Mitigasi Struktural dalam Revisi Audit Final |
 | :--- | :--- |
 | **Akses langsung tabel data pribadi via PostgREST (`post_drafts`, `bookmarks`, `post_reactions`)** | Ketiga tabel dipindahkan dari `public` ke `private` (tidak diekspos PostgREST), seluruh grant langsung dicabut, dan akses pengguna hanya melalui `public.rpc_*` yang mengunci identitas ke `auth.uid()`. |
+| **Pembacaan komentar yang sudah dihapus penulis lewat `/rest/v1/comments`** | `rpc_delete_own_comment` menimpa `body_markdown = '[Komentar telah dihapus oleh penulis]'` langsung di tabel dasar (setelah cek hold aktif), sehingga `public.comments` maupun `public_comments_view` tidak menyimpan teks lama. |
 | **Kebocoran kepemilikan via tabel/view publik** | `public.posts`, `public.comments`, dan `public.aliases` tidak memiliki kolom `user_id`; public view memakai `security_invoker = true, security_barrier = true`. |
-| **Asumsi keliru `auth.uid()` di `service_role` atau bypass wrapper** | Jalur pengguna (`authenticated` -> `auth.uid()`, tanpa `p_user_id`) dipisah total dari jalur staf/worker (`service_role` only `public.rpc_staff_*` / `rpc_worker_*`, ditolak untuk `anon`/`authenticated`). |
+| **Kontradiksi `SECURITY DEFINER` vs `FORCE ROW LEVEL SECURITY` / `auth.uid()` di `service_role`** | Kepemilikan `SECURITY DEFINER` diselaraskan (`postgres` dengan SQL guard eksplisit atau `unsaid_app_definer` dengan policy RLS eksplisit); jalur `authenticated` (`auth.uid()`, tanpa `p_user_id`) dipisah total dari jalur `service_role` (`auth.uid()` bernilai `NULL`, `public.rpc_staff_*` hanya untuk `service_role`). |
 | **Klaim palsu role staf dari JWT metadata** | Role staf tidak dibaca dari JWT `user_metadata`; Astro SSR memverifikasi `auth.getUser()` lalu SQL memverifikasi `private.staff_roles` (`revoked_at IS NULL`) di setiap panggilan `rpc_staff_*`. |
-| **Lockout permanen atau unlink parsial saat hapus akun** | Sesi hanya dicabut (tidak ban permanen) sebelum `db_unlinked`; rollback penuh jika DB gagal sebelum `db_unlinked`; retry worker idempoten + recovery screen pra-`db_unlinked`; `FOR SHARE` vs `FOR UPDATE` memblokir penulisan paralel. |
-| **Pemulihan tautan kepemilikan secara tidak sah pasca-`db_unlinked`** | Ownership dihapus permanen di `db_unlinked`; manual intervention hanya menyelesaikan panggilan Auth eksternal tanpa pernah merekonstruksi link kepemilikan. |
-| **Kebocoran payload `legal_vault` melalui DB dump / superuser** | Snapshot memakai enkripsi **AES-256-GCM Envelope Encryption** di application/worker layer dengan KEK eksternal di luar PostgreSQL; DB hanya menyimpan ciphertext `BYTEA` dan `wrapped_dek`. |
+| **Kegagalan onboarding OTP / kesalahan `signOut(user_id)` saat hapus akun** | Trigger `auth.users` + `rpc_ensure_user_account()` menjamin inisialisasi `user_accounts`; `signOut(userAccessToken, 'global')` hanya dipanggil saat SSR memegang `jwt`, dengan `account_status = 'pending_deletion'` sebagai pengunci akses utama jika panggilan `signOut` gagal atau di worker. |
+| **Lockout permanen, unlink parsial, atau benturan `CHECK` saat hapus akun** | Rollback penuh jika DB gagal pra-`db_unlinked`; retry worker idempoten + recovery screen pra-`db_unlinked`; `FOR SHARE` vs `FOR UPDATE` memblokir penulisan paralel; redaksi banding memakai placeholder >= 10 karakter + `is_redacted_by_deletion`; `db_unlinked` memblokir rekonstruksi ownership selamanya. |
+| **Fork rantai hash audit log & TOCTOU / kebocoran `legal_vault`** | Penulisan log memakai `pg_advisory_xact_lock`; hold lintas entitas diperiksa ulang di dalam `db_unlinked` (`SNAPSHOT_REQUIRED`); snapshot memakai enkripsi **AES-256-GCM** dengan KEK eksternal di luar PostgreSQL; `purge_after` tersinkronisasi saat hold diperpanjang/dilepas. |
 | **Korelasi waktu penghapusan akun melalui angka reaksi atau `updated_at`** | `post_reaction_stats.retained_appreciation_count` tidak berkurang saat akun dihapus (tanpa trigger `AFTER DELETE`), dan `posts.updated_at` ditekan oleh `unsaid.suppress_updated_at = 'on'` saat rilis alias/hapus akun. |
 | **Asumsi keliru `indonesian` FTS** | Wajib pre-flight `pg_ts_config` sebelum migrasi; fallback otomatis ke `'simple'` + `pg_trgm`. |
 
@@ -933,18 +972,21 @@ Tier staf didefinisikan sebagai aplikasi RBAC di `private.staff_roles` dan diteg
    - Validasi konten pendek/puisi (>= 1 karakter non-spasi, penolakan XSS/script/`javascript:` URI), normalisasi alias, `assertPublicPayloadSanitized()`, dan unit test pembungkusan/pembukaan amplop `AES-256-GCM` pada modul enkripsi `legal_vault`.
 2. **PostgreSQL, PostgREST & RLS Direct Security Tests (Wajib terhadap Proyek Supabase Live di TASK 004B+):**
    - Verifikasi langsung via HTTP PostgREST (`/rest/v1/post_drafts`, `/rest/v1/bookmarks`, `/rest/v1/post_reactions`, `/rest/v1/private.*`, `/rest/v1/legal_vault.*`) dengan `anon` key dan `authenticated` JWT -> **wajib ditolak (`401/403/404`)**.
-   - Verifikasi `anon` dan `authenticated` JWT memanggil `/rest/v1/rpc/rpc_staff_*`, `rpc_legal_*`, dan `rpc_worker_*` -> **wajib ditolak (`42501 permission denied`)**.
-   - Verifikasi `public.rpc_*` user wrappers menolak `anon` dan mengabaikan/tidak menyediakan `p_user_id`, sehingga User A tidak pernah bisa membaca/mengubah draf, bookmark, atau reaksi User B.
-   - Verifikasi `rpc_staff_list_moderation_queue` untuk `moderator` gagal bila dipanggil oleh user biasa atau `operational_admin`, serta mengembalikan payload tanpa `reporter_user_id`, `appellant_user_id`, dan `owner_user_id`.
-   - Uji **Deletion Concurrency & Failure Recovery:**
+   - Verifikasi `anon` dan `authenticated` JWT memanggil `/rest/v1/rpc/rpc_staff_*`, `rpc_legal_*`, `rpc_worker_*`, dan `rpc_ensure_user_account` -> `rpc_staff_*`/`rpc_legal_*`/`rpc_worker_*` **wajib ditolak (`42501`)**; seluruh user wrapper berjalan sukses memakai role pemilik terverifikasi (`C-1`) tanpa tertolak `FORCE ROW LEVEL SECURITY` dan mengunci user ke `auth.uid()` masing-masing.
+   - Verifikasi akses REST langsung `/rest/v1/comments?select=body_markdown` setelah `rpc_delete_own_comment` **hanya mengembalikan placeholder** (`M-1`), bukan teks komentar asli.
+   - Verifikasi pengguna baru Email OTP otomatis memiliki baris `private.user_accounts` (`M-2`), dan `rpc_ensure_user_account()` menolak pembuatan ulang bila ada `deletion_jobs` aktif.
+   - Verifikasi `rpc_staff_list_moderation_queue`, `rpc_staff_list_appeals`, dan `rpc_staff_list_audit_logs` menolak user biasa/`operational_admin`, menyembunyikan identitas pelapor/pengaju banding/pemilik, serta menjaga integritas rantai hash `moderation_audit_logs` di bawah eksekusi paralel (`M-5`).
+   - Verifikasi pemisahan kewenangan `legal_vault`: `super_admin_security` gagal memanggil `rpc_legal_access_snapshot` secara sepihak (`M-5`).
+   - Uji **Deletion Concurrency & Failure Recovery (`C-2`, `M-3`, `M-4`):**
      - Balapan penulisan draf/komentar (`FOR SHARE`) vs `rpc_request_account_deletion` (`FOR UPDATE`) -> zero orphan records.
-     - Simulasi `auth_session_revoked` sukses lalu kegagalan DB pada Step 2 -> transaksi rollback utuh, user masih bisa login ke Recovery Screen untuk melanjutkan penghapusan tanpa lockout permanen.
-     - Simulasi `db_unlinked` sukses lalu `auth.admin.deleteUser` gagal berulang -> OTP login pasca-`db_unlinked` hard-blocked, worker retry menuntaskan `completed`, dan manual intervention tidak pernah memulihkan kepemilikan.
+     - Simulasi `signOut(jwt)` gagal/kedaluwarsa -> token lama tetap ditolak seluruh RPC privat karena `account_status = 'pending_deletion'`.
+     - Simulasi `auth_session_revoked` sukses lalu kegagalan DB pada Step 2 (termasuk kasus pengguna memiliki `moderation_appeals` aktif -> verifikasi redaksi `appeal_statement` memenuhi `CHECK >= 10` karakter) -> rollback utuh pra-`db_unlinked`, lalu pemulihan sukses hingga `completed`.
+     - Simulasi hold baru disetujui paralel di antara pengecekan worker dan `db_unlinked` -> `rpc_worker_execute_db_unlink` mengembalikan `SNAPSHOT_REQUIRED` hingga snapshot terenkripsi selesai dibuat.
    - Uji **Reaksi & Timestamp:** Verifikasi `retained_appreciation_count` berkurang `-1` saat user aktif mencabut apresiasi, **tetap tidak berubah** saat akun dihapus (`private.post_reactions` terhapus), serta `published_at` dan `updated_at` tidak berubah.
-   - Uji **Legal Preservation Encryption:** Verifikasi `legal_preservation_snapshots` menyimpan ciphertext `BYTEA` (tidak dapat dibaca dari query `SELECT` biasa tanpa KEK eksternal), wajib two-person approval saat dekripsi, dan terhapus otomatis saat `purge_after` lewat.
+   - Uji **Legal Preservation Encryption:** Verifikasi `legal_preservation_snapshots` menyimpan ciphertext `BYTEA`, wajib two-person approval saat dekripsi, menyinkronkan `purge_after` saat `expires_at` hold diperpanjang, dan terhapus otomatis saat `purge_after` lewat.
    - Uji pre-flight `pg_ts_config` untuk pencarian teks Bahasa Indonesia.
 3. **Playwright E2E Tests:**
-   - Alur lengkap Email OTP -> buat draf -> klaim alias -> terbit Anonim & Alias -> rilis alias (post jadi `Anonim`, karantina 30 hari berlaku bagi pemilik lama) -> komentar Anonim -> apresiasi & cabut apresiasi -> lapor & review moderator -> hapus akun & verifikasi tulisan publik tetap tersedia sebagai `Anonim`.
+   - Alur lengkap Email OTP (pengguna baru) -> buat draf -> klaim alias -> terbit Anonim & Alias -> rilis alias (post jadi `Anonim`, karantina 30 hari berlaku bagi pemilik lama) -> komentar Anonim & hapus komentar -> apresiasi & cabut apresiasi -> lapor & review moderator/banding -> hapus akun & verifikasi tulisan publik tetap tersedia sebagai `Anonim`.
 
 ---
 
@@ -954,6 +996,7 @@ Tier staf didefinisikan sebagai aplikasi RBAC di `private.staff_roles` dan diteg
 1. Penetapan durasi retensi pasti untuk laporan tertutup, log moderasi/banding non-PII, audit log keamanan, dan akun tidak aktif jangka panjang sesuai UU PDP Indonesia.
 2. Persyaratan hukum formal untuk dasar aktivasi, perpanjangan, batas maksimum masa berlaku (`expires_at`), dan aturan pemberitahuan/non-pemberitahuan `legal_vault.legal_preservation_holds` sesuai UU ITE / KUHAP / UU PDP.
 3. Kewenangan penghapusan atau redaksi wajib untuk pelanggaran berat (mis. CSAM atau doxxing berbahaya) saat ada permintaan hapus akun atau kewajiban hukum tertentu.
+4. Konfirmasi hukum apakah snapshot hold bertipe `'user'` wajib mencakup `auth_identity` (`email` dari `auth.users`) sebelum `auth.admin.deleteUser(user_id)` dijalankan.
 
 ### B. Items Still Requiring Founder Approval (`[REQUIRES FOUNDER APPROVAL]`)
 1. **Batas Kuota Alias & Rate Limit Harian:** Penetapan batas maksimum alias aktif per akun (mis. 5 alias aktif) serta batas frekuensi klaim/rilis harian.
@@ -963,6 +1006,6 @@ Tier staf didefinisikan sebagai aplikasi RBAC di `private.staff_roles` dan diteg
 
 ### C. Technical Prerequisites Before TASK 004B / SQL Implementation
 1. Penyediaan proyek Supabase live beserta `PUBLIC_SUPABASE_URL`, `PUBLIC_SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, dan konfigurasi KMS / `LEGAL_VAULT_KEK` eksternal.
-2. Eksekusi pemeriksaan `SELECT cfgname FROM pg_ts_config WHERE cfgname = 'indonesian';` pada database target.
-3. Konfigurasi SMTP OTP Email Bahasa Indonesia serta keputusan aktivasi Passkeys Beta (`RP ID`, `RP Name`, `RP Origins`).
-4. Persetujuan arsitektur akhir dari ChatGPT dan persetujuan eksplisit Founder atas dokumen revisi ini sebelum migrasi SQL dimulai.
+2. Verifikasi pre-flight database target: `SELECT cfgname FROM pg_ts_config WHERE cfgname = 'indonesian';`, izin pembuatan trigger `AFTER INSERT ON auth.users`, izin opsi role `unsaid_app_definer` vs `postgres` untuk fungsi `SECURITY DEFINER`, serta mekanisme pencabutan sesi server-side GoTrue jika dibutuhkan selain `signOut(jwt)`.
+3. Konfigurasi SMTP OTP Email Bahasa Indonesia serta keputusan aktivasi *feature flag* Passkeys Beta (`RP ID`, `RP Name`, `RP Origins`).
+4. Review akhir Project Manager (ChatGPT) dan persetujuan eksplisit Founder atas dokumen revisi ini sebelum migrasi SQL di TASK 004B dimulai.
